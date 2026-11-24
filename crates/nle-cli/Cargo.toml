@@ -1,0 +1,19 @@
+[package]
+name = "nle-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Aagedal NLE Project Converter"
+
+[[bin]]
+name = "nle-convert"
+path = "src/main.rs"
+
+[dependencies]
+nle-core.workspace = true
+nle-effects.workspace = true
+nle-premiere.workspace = true
+nle-resolve.workspace = true
+nle-interchange.workspace = true
+clap.workspace = true
+serde_json.workspace = true

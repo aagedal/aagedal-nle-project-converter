@@ -1,0 +1,11 @@
+[package]
+name = "nle-interchange"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FCPXML 1.11, OpenTimelineIO (.otio), and FCP7 XMEML v5 interchange writers"
+
+[dependencies]
+nle-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

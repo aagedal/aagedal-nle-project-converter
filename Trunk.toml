@@ -1,0 +1,10 @@
+[build]
+target = "crates/nle-ui/index.html"
+dist = "ui-dist"
+
+[watch]
+watch = ["crates/nle-ui"]
+
+[serve]
+port = 1420
+open = false

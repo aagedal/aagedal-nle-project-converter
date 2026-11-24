@@ -1,0 +1,15 @@
+[package]
+name = "nle-resolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Direct DaVinci Resolve (.drp) native ZIP/XML/protobuf writer and reader"
+
+[dependencies]
+nle-core.workspace = true
+zip.workspace = true
+flate2.workspace = true
+roxmltree.workspace = true
+regex.workspace = true
+uuid.workspace = true
+serde.workspace = true

@@ -1,0 +1,8 @@
+/target
+/ui-dist
+/crates/nle-ui/target
+/crates/nle-ui/dist
+/src-tauri/target
+/src-tauri/gen/schemas
+*.drp.tmp
+.DS_Store

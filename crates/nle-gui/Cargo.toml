@@ -1,0 +1,21 @@
+[package]
+name = "nle-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native GPUI desktop GUI for Aagedal NLE Project Converter"
+
+[[bin]]
+name = "aagedal-nle-converter"
+path = "src/main.rs"
+
+[dependencies]
+nle-core.workspace = true
+nle-effects.workspace = true
+nle-premiere.workspace = true
+nle-resolve.workspace = true
+nle-interchange.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+gpui-kit = "0.11"
+rfd = "0.18"

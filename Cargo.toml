@@ -7,10 +7,7 @@ members = [
     "crates/nle-resolve",
     "crates/nle-interchange",
     "crates/nle-cli",
-    "src-tauri",
-]
-exclude = [
-    "crates/nle-ui",
+    "crates/nle-gui",
 ]
 
 [workspace.package]

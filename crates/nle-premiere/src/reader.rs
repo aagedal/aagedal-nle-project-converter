@@ -4,6 +4,7 @@ use nle_core::{
     frames_to_timecode, Clip, ColorConfig, EffectCategory, EffectInstance, EffectParameter,
     LumetriData, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat,
     NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, Track, TrackKind,
+    Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -65,9 +66,20 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
         )));
     }
 
-    // Build fast ObjectID and ObjectUID lookup tables across all top-level and nested objects
+    // Build fast ObjectID and ObjectUID lookup tables.
+    // Top-level children of <PremiereData> MUST be indexed first because nested UI nodes
+    // (such as <ColumnList>, <StringColumn>, <ProjectViewState>) reuse low ObjectIDs like
+    // "1", "2", "3", ... and would otherwise shadow top-level <ProjectSettings> or <VideoMediaSource> nodes.
     let mut by_id: HashMap<&str, Node<'_, '_>> = HashMap::new();
     let mut by_uid: HashMap<&str, Node<'_, '_>> = HashMap::new();
+    for node in root.children().filter(|n| n.is_element()) {
+        if let Some(id) = node.attribute("ObjectID") {
+            by_id.entry(id).or_insert(node);
+        }
+        if let Some(uid) = node.attribute("ObjectUID") {
+            by_uid.entry(uid).or_insert(node);
+        }
+    }
     for node in root.descendants().filter(|n| n.is_element()) {
         if let Some(id) = node.attribute("ObjectID") {
             by_id.entry(id).or_insert(node);
@@ -543,6 +555,12 @@ fn parse_sequence(
         }
     }
 
+    let start_tc_frame = child_text(seq_node, "ZeroPoint")
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&t| t > 0)
+        .map(|t| frame_rate.adobe_ticks_to_frames(t))
+        .unwrap_or(0);
+
     Sequence {
         id,
         name,
@@ -550,6 +568,7 @@ fn parse_sequence(
         height,
         frame_rate,
         duration_frames: max_end,
+        start_tc_frame,
         mark_in,
         mark_out,
         video_tracks,
@@ -606,28 +625,41 @@ fn parse_track(
     );
 
     let mut clips = Vec::new();
-    if let Some(items_sec) = ct.and_then(|c| find_descendant(c, "TrackItems")) {
-        for ti_ref in items_sec.children().filter(|n| n.has_tag_name("TrackItem")) {
-            let Some(ti_el) = resolve_node(ti_ref, by_id, by_uid) else {
-                continue;
-            };
-            let Some(cti) = ti_el.children().find(|n| n.has_tag_name("ClipTrackItem")) else {
-                continue;
-            };
-            let ti_obj_id = ti_el.attribute("ObjectID").unwrap_or("");
-            let clip = parse_clip(
-                cti,
-                ti_obj_id,
-                kind,
-                seq_w,
-                seq_h,
-                seq_fps,
-                by_id,
-                by_uid,
-                link_map,
-                media_map,
-            );
-            clips.push(clip);
+    let mut transitions = Vec::new();
+    if let Some(clip_track) = ct {
+        // Premiere stores clips in <ClipItems><TrackItems> and transitions in <TransitionItems><TrackItems>.
+        for items_sec in clip_track
+            .descendants()
+            .filter(|n| n.has_tag_name("TrackItems"))
+        {
+            for ti_ref in items_sec.children().filter(|n| n.has_tag_name("TrackItem")) {
+                let Some(ti_el) = resolve_node(ti_ref, by_id, by_uid) else {
+                    continue;
+                };
+                if let Some(tti) = ti_el.children().find(|n| n.has_tag_name("TransitionTrackItem")) {
+                    if let Some(tr) = parse_transition(tti, seq_fps) {
+                        transitions.push(tr);
+                    }
+                    continue;
+                }
+                let Some(cti) = ti_el.children().find(|n| n.has_tag_name("ClipTrackItem")) else {
+                    continue;
+                };
+                let ti_obj_id = ti_el.attribute("ObjectID").unwrap_or("");
+                let clip = parse_clip(
+                    cti,
+                    ti_obj_id,
+                    kind,
+                    seq_w,
+                    seq_h,
+                    seq_fps,
+                    by_id,
+                    by_uid,
+                    link_map,
+                    media_map,
+                );
+                clips.push(clip);
+            }
         }
     }
 
@@ -640,9 +672,61 @@ fn parse_track(
         muted,
         solo,
         clips,
-        transitions: Vec::new(),
+        transitions,
         markers: track_markers,
     }
+}
+
+fn parse_transition(tti: Node<'_, '_>, seq_fps: Rational) -> Option<Transition> {
+    let ti_inner = tti.children().find(|n| n.has_tag_name("TrackItem"));
+    // Premiere omits <Start> when the transition begins at tick 0.
+    let start_frame = ti_inner
+        .and_then(|n| child_text(n, "Start"))
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .map(|t| seq_fps.adobe_ticks_to_frames(t))
+        .unwrap_or(0);
+    let end_frame = ti_inner
+        .and_then(|n| child_text(n, "End"))
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .map(|t| seq_fps.adobe_ticks_to_frames(t))
+        .unwrap_or(start_frame);
+    if end_frame <= start_frame {
+        return None;
+    }
+
+    let match_name = child_text(tti, "MatchName").unwrap_or_default();
+    let display_name = child_text(tti, "DisplayName")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if match_name.is_empty() {
+                "Transition".to_string()
+            } else {
+                match_name.clone()
+            }
+        });
+    let has_out = child_text(tti, "HasOutgoingClip")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let has_in = child_text(tti, "HasIncomingClip")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let alignment = match (has_out, has_in) {
+        (false, true) => "start".to_string(),
+        (true, false) => "end".to_string(),
+        _ => "center".to_string(),
+    };
+
+    Some(Transition {
+        name: display_name,
+        effect_id: if match_name.is_empty() {
+            "Transition".to_string()
+        } else {
+            match_name
+        },
+        start_frame,
+        end_frame,
+        alignment,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -669,6 +753,10 @@ fn parse_clip(
         .and_then(|s| s.trim().parse::<i64>().ok())
         .map(|t| seq_fps.adobe_ticks_to_frames(t))
         .unwrap_or(start_frame);
+    let enabled = !ti_inner
+        .and_then(|n| child_text(n, "Deactivated"))
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let mut name = "(unnamed clip)".to_string();
     let mut media_path = String::new();
@@ -689,6 +777,7 @@ fn parse_clip(
     let mut source_tc_frame = 0i64;
     let mut sample_rate = 48_000u32;
     let mut speed_percent = 100.0f64;
+    let mut audio_channel = 1u32;
     let mut label_name: Option<String> = None;
     let mut label_preset_index: Option<u8> = None;
 
@@ -796,6 +885,24 @@ fn parse_clip(
                     speed_percent = if ps.abs() <= 10.0 { ps * 100.0 } else { ps };
                 }
             }
+
+            // Extract 1-based source audio channel from SecondaryContents/SecondaryContentItem -> ChannelIndex
+            if kind == TrackKind::Audio {
+                if let Some(sec_contents) = clip_el.children().find(|n| n.has_tag_name("SecondaryContents")) {
+                    if let Some(first_item) = sec_contents
+                        .children()
+                        .find(|n| n.has_tag_name("SecondaryContentItem"))
+                    {
+                        if let Some(sec_node) = resolve_node(first_item, by_id, by_uid) {
+                            if let Some(ch_idx) = child_text(sec_node, "ChannelIndex")
+                                .and_then(|s| s.trim().parse::<u32>().ok())
+                            {
+                                audio_channel = ch_idx + 1;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -873,10 +980,17 @@ fn parse_clip(
                 let Some(component) = resolve_node(comp_ref, by_id, by_uid) else {
                     continue;
                 };
-                let match_name = child_text(component, "MatchName").unwrap_or_default();
+                let match_name = child_text(component, "MatchName")
+                    .or_else(|| child_text(component, "FilterMatchName"))
+                    .unwrap_or_default();
                 let lower = match_name.to_ascii_lowercase();
+                let is_intrinsic = find_descendant(component, "Intrinsic")
+                    .and_then(|n| n.text())
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
                 let display_name = child_text(component, "InstanceName")
                     .or_else(|| nested_text(component, &["Component", "DisplayName"]))
+                    .or_else(|| find_descendant(component, "DisplayName").and_then(|n| n.text()).map(|s| s.to_string()))
                     .or_else(|| child_text(component, "Name"))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| match_name.clone());
@@ -921,8 +1035,14 @@ fn parse_clip(
                     }
                     continue;
                 }
-                // Skip intrinsic audio volume/panner unless modified, or capture non-intrinsic audio effects
-                if lower.contains("adbe volume") || lower.contains("adbe panner") || lower.contains("adbe channel volume") {
+                // Skip intrinsic audio volume/panner/channel volume components
+                if is_intrinsic
+                    || lower.contains("adbe volume")
+                    || lower.contains("adbe panner")
+                    || lower.contains("adbe channel volume")
+                    || lower.starts_with("internal volume")
+                    || lower.starts_with("internal channel volume")
+                {
                     continue;
                 }
 
@@ -940,6 +1060,52 @@ fn parse_clip(
                         is_intrinsic: false,
                         is_animated,
                         parameters: params,
+                    });
+                }
+            }
+        }
+    }
+
+    // Detect Adobe Essential Sound panel processing stored in TrackItem Properties (ESP.*)
+    if kind == TrackKind::Audio {
+        if let Some(props) = ti_inner.and_then(|n| find_descendant(n, "Properties")) {
+            if let Some(mode) = child_text(props, "ESP.AdjustmentsModeID").filter(|s| !s.is_empty()) {
+                let mut esp_params = Vec::new();
+                for p in props.children().filter(|n| n.is_element()) {
+                    let tag = p.tag_name().name();
+                    if tag.starts_with("ESP.RestorationSection.")
+                        || tag.starts_with("ESP.ClaritySection.")
+                        || tag.starts_with("ESP.Loudness")
+                        || tag.starts_with("ESP.CreativeSection.")
+                    {
+                        if let Some(val) = p.text().map(str::trim).filter(|v| !v.is_empty()) {
+                            esp_params.push(EffectParameter {
+                                id: tag.to_string(),
+                                name: tag.trim_start_matches("ESP.").to_string(),
+                                value: val.to_string(),
+                                is_animated: false,
+                            });
+                        }
+                    }
+                }
+                if !esp_params.is_empty() {
+                    let mode_label = match mode.as_str() {
+                        "dialog" => "Dialogue",
+                        "music" => "Music",
+                        "sfx" => "SFX",
+                        "ambience" => "Ambience",
+                        other => other,
+                    };
+                    effects.push(EffectInstance {
+                        id: format!("esp-{ti_obj_id}"),
+                        match_name: format!("Premiere.EssentialSound.{mode}"),
+                        display_name: format!("Essential Sound ({mode_label})"),
+                        category: EffectCategory::Audio,
+                        media_kind: TrackKind::Audio,
+                        enabled: true,
+                        is_intrinsic: false,
+                        is_animated: false,
+                        parameters: esp_params,
                     });
                 }
             }
@@ -967,8 +1133,8 @@ fn parse_clip(
         source_height: source_h,
         speed_percent,
         reversed: speed_percent < 0.0,
-        enabled: true,
-        audio_channel: 1,
+        enabled,
+        audio_channel,
         link_group_id: link_map.get(ti_obj_id).cloned(),
         label_name,
         label_preset_index,

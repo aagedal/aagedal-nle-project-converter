@@ -73,9 +73,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 inspection.missing_media_count,
                 inspection.sequences.len()
             );
-            for seq in &inspection.sequences {
+            for (idx, seq) in inspection.sequences.iter().enumerate() {
+                let trans_count: usize = project
+                    .sequences
+                    .get(idx)
+                    .map(|s| {
+                        s.video_tracks
+                            .iter()
+                            .chain(s.audio_tracks.iter())
+                            .map(|t| t.transitions.len())
+                            .sum()
+                    })
+                    .unwrap_or(0);
                 println!(
-                    "  • {} — {}x{} @ {} fps | {} | V:{} ({} clips) A:{} ({} clips) | {} effects",
+                    "  • {} — {}x{} @ {} fps | {} | V:{} ({} clips) A:{} ({} clips) | {} transitions | {} effects",
                     seq.name,
                     seq.width,
                     seq.height,
@@ -85,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     seq.video_clip_count,
                     seq.audio_track_count,
                     seq.audio_clip_count,
+                    trans_count,
                     seq.effect_count
                 );
             }

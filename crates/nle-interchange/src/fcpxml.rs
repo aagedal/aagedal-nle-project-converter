@@ -111,14 +111,20 @@ pub fn write_fcpxml_file(
         let dur_str = seq
             .frame_rate
             .frames_to_fcpxml(seq.computed_duration_frames().max(1));
+        let tc_start_str = if seq.start_tc_frame > 0 {
+            seq.frame_rate.frames_to_fcpxml(seq.start_tc_frame)
+        } else {
+            "0s".to_string()
+        };
         xml.push_str(&format!("      <project name=\"{}\">\n", xml_escape(&seq.name)));
         xml.push_str(&format!(
-            "        <sequence format=\"r1\" duration=\"{dur_str}\" tcStart=\"0s\" tcFormat=\"{}\" audioLayout=\"stereo\" audioRate=\"48k\">\n",
+            "        <sequence format=\"r1\" duration=\"{dur_str}\" tcStart=\"{tc_start_str}\" tcFormat=\"{}\" audioLayout=\"stereo\" audioRate=\"48k\">\n",
             if seq.frame_rate.is_ntsc() { "DF" } else { "NDF" }
         ));
         xml.push_str("          <spine>\n");
 
         // Primary storyline = V1 (with gaps if needed)
+        let tc_base = seq.start_tc_frame.max(0);
         if let Some(v1) = seq.video_tracks.first() {
             let mut sorted_clips = v1.clips.clone();
             sorted_clips.sort_by_key(|c| c.start_frame);
@@ -126,7 +132,7 @@ pub fn write_fcpxml_file(
             for clip in &sorted_clips {
                 if clip.start_frame > cursor {
                     let gap_dur = seq.frame_rate.frames_to_fcpxml(clip.start_frame - cursor);
-                    let gap_off = seq.frame_rate.frames_to_fcpxml(cursor);
+                    let gap_off = seq.frame_rate.frames_to_fcpxml(tc_base + cursor);
                     xml.push_str(&format!(
                         "            <gap name=\"Gap\" offset=\"{gap_off}\" duration=\"{gap_dur}\"/>\n"
                     ));
@@ -137,7 +143,7 @@ pub fn write_fcpxml_file(
                     clip.media_path.clone()
                 };
                 let rid = &asset_ids[&key];
-                let off = seq.frame_rate.frames_to_fcpxml(clip.start_frame.max(0));
+                let off = seq.frame_rate.frames_to_fcpxml(tc_base + clip.start_frame.max(0));
                 let dur = seq.frame_rate.frames_to_fcpxml(clip.duration_frames().max(1));
                 let start = seq.frame_rate.frames_to_fcpxml(clip.source_in_frame.max(0));
                 xml.push_str(&format!(

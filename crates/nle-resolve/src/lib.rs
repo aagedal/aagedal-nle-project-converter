@@ -55,6 +55,7 @@ mod tests {
                 height: 1080,
                 frame_rate: Rational::FPS_25,
                 duration_frames: 150,
+                start_tc_frame: 0,
                 mark_in: Some(10),
                 mark_out: Some(100),
                 video_tracks: vec![Track {
@@ -181,5 +182,141 @@ mod tests {
         assert!(reread.sequences[0].audio_tracks[0].locked);
 
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn roundtrips_start_tc_offset_and_transitions() {
+        let project = Project {
+            name: "TC & Transitions".into(),
+            source_format: NleFormat::DaVinciResolve,
+            sequences: vec![Sequence {
+                id: "seq-tc".into(),
+                name: "Timeline 1".into(),
+                width: 3840,
+                height: 2160,
+                frame_rate: Rational::FPS_24,
+                duration_frames: 200,
+                start_tc_frame: 86_400, // 01:00:00:00 @ 24fps
+                mark_in: None,
+                mark_out: None,
+                video_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    clips: vec![Clip {
+                        id: "v1".into(),
+                        name: "ShotA.mp4".into(),
+                        media_id: "m1".into(),
+                        media_path: "/Media/ShotA.mp4".into(),
+                        media_kind: MediaKind::Video,
+                        start_frame: 0,
+                        end_frame: 200,
+                        source_in_frame: 10,
+                        source_out_frame: 210,
+                        source_in_ticks: None,
+                        source_out_ticks: None,
+                        source_fps: Rational::FPS_24,
+                        source_width: 3840,
+                        source_height: 2160,
+                        speed_percent: 100.0,
+                        reversed: false,
+                        enabled: true,
+                        audio_channel: 1,
+                        link_group_id: None,
+                        label_name: None,
+                        label_preset_index: None,
+                        motion: MotionTransform::default(),
+                        opacity: 100.0,
+                        lumetri_effects: vec![],
+                        effects: vec![],
+                        markers: vec![],
+                    }],
+                    transitions: vec![Transition {
+                        name: "Cross Dissolve".into(),
+                        effect_id: "Cross Dissolve".into(),
+                        start_frame: 88,
+                        end_frame: 112,
+                        alignment: "center".into(),
+                    }],
+                    markers: vec![],
+                }],
+                audio_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Audio,
+                    name: "A1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    clips: vec![],
+                    transitions: vec![Transition {
+                        name: "Constant Power".into(),
+                        effect_id: "Constant Power".into(),
+                        start_frame: 0,
+                        end_frame: 12,
+                        alignment: "start".into(),
+                    }],
+                    markers: vec![],
+                }],
+                markers: vec![],
+                metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_tc_trans_test.drp");
+        write_drp_file(&project, &out_path, &ConversionOptions::default()).expect("write .drp");
+
+        let reread = read_drp_file(&out_path).expect("re-read .drp");
+        let seq = &reread.sequences[0];
+        assert_eq!(seq.start_tc_frame, 86_400);
+        assert_eq!(seq.computed_duration_frames(), 200);
+        assert_eq!(seq.video_tracks[0].clips[0].start_frame, 0);
+        assert_eq!(seq.video_tracks[0].transitions.len(), 1);
+        assert_eq!(seq.video_tracks[0].transitions[0].name, "Cross Dissolve");
+        assert_eq!(seq.video_tracks[0].transitions[0].start_frame, 88);
+        assert_eq!(seq.video_tracks[0].transitions[0].end_frame, 112);
+        assert_eq!(seq.audio_tracks[0].transitions.len(), 1);
+        assert_eq!(seq.audio_tracks[0].transitions[0].name, "Cross Fade +3DB");
+        assert_eq!(seq.audio_tracks[0].transitions[0].alignment, "start");
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn merges_same_frame_markers_and_builds_sequence_setup() {
+        let markers = vec![
+            Marker {
+                frame: 10,
+                duration_frames: 20,
+                name: "FX A".into(),
+                comment: "Detail A".into(),
+                color: "Purple".into(),
+                scope: MarkerScope::Sequence,
+            },
+            Marker {
+                frame: 10,
+                duration_frames: 50,
+                name: "FX B".into(),
+                comment: "Detail B".into(),
+                color: "Purple".into(),
+                scope: MarkerScope::Sequence,
+            },
+        ];
+        let hex = state::encode_timeline_markers(&markers);
+        let bytes = binary::hex_decode(&hex).expect("valid hex");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("FX A + FX B"));
+        assert!(text.contains("Detail A\nDetail B"));
+
+        let setup = state::build_sequence_setup_blob(1080, 1920, 25);
+        assert_eq!(setup.len(), 422);
+        assert_eq!(u64::from_be_bytes(setup[40..48].try_into().unwrap()), 1080);
+        assert_eq!(u64::from_be_bytes(setup[48..56].try_into().unwrap()), 1920);
+        assert_eq!(u64::from_be_bytes(setup[76..84].try_into().unwrap()), 25);
     }
 }

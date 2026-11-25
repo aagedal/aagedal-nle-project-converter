@@ -391,9 +391,36 @@ pub fn builtin_effect_catalog() -> Vec<EffectRule> {
         },
         // ── Audio Effects (Ask User) ──────────────────────────────────
         EffectRule {
+            id: "pr_essential_sound".into(),
+            source_nle: NleFormat::PremierePro,
+            match_patterns: vec!["premiere.essentialsound".into(), "essential sound".into()],
+            source_display_name: "Essential Sound".into(),
+            category: EffectCategory::Audio,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Premiere Essential Sound panel processing (Dialogue / Music / SFX / Ambience restoration, clarity, loudness).".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.fairlight.voice_isolation".into(),
+                    display_name: "Fairlight → Voice Isolation & Track EQ / Dynamics".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Audio,
+                    studio_only: false,
+                    notes: "Rebuilt using Fairlight Voice Isolation / Noise Reduction, EQ, and Dynamics.".into(),
+                },
+                TargetEffectOption {
+                    id: "fcp.voice_isolation".into(),
+                    display_name: "Audio Inspector → Voice Isolation & Channel EQ".into(),
+                    target_nle: NleFormat::FinalCutPro,
+                    category: EffectCategory::Audio,
+                    studio_only: false,
+                    notes: "Built-in FCP Voice Isolation & EQ.".into(),
+                },
+            ],
+        },
+        EffectRule {
             id: "pr_denoise".into(),
             source_nle: NleFormat::PremierePro,
-            match_patterns: vec!["denoise".into(), "de-noise".into(), "essential sound".into(), "enhance speech".into()],
+            match_patterns: vec!["denoise".into(), "de-noise".into(), "enhance speech".into()],
             source_display_name: "DeNoise / Enhance Speech".into(),
             category: EffectCategory::Audio,
             fidelity: MappingFidelity::AskUserSuggested,

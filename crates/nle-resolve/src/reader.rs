@@ -1,7 +1,8 @@
-use crate::binary::{decode_protobuf, decode_wrapper_hex, hex_decode, ProtoValue};
+use crate::binary::{decode_keyed_fields, decode_protobuf, decode_wrapper_hex, hex_decode, ProtoValue};
 use nle_core::{
-    Clip, ColorConfig, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat, NleResult,
-    Project, ProjectBin, ProjectReader, Rational, Sequence, Track, TrackKind,
+    frames_to_timecode, Clip, ColorConfig, MediaAsset, MediaKind, MotionTransform, NleError,
+    NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, Track,
+    TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -57,6 +58,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         width: u32,
         height: u32,
         fps: Rational,
+        start_tc_frame: i64,
     }
 
     let mut seq_meta_by_id: HashMap<String, SeqMeta> = HashMap::new();
@@ -91,6 +93,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                         let (width, height) = child_text(seq_el, "Resolution")
                             .and_then(|h| decode_resolve_resolution(&h))
                             .unwrap_or((1920, 1080));
+                        let start_tc_frame = child_text(seq_el, "MediaExtents")
+                            .and_then(|h| decode_resolve_media_extents(&h))
+                            .map(|(start_sec, _)| (start_sec * fps.as_f64()).round() as i64)
+                            .unwrap_or(0)
+                            .max(0);
                         if !seq_id.is_empty() {
                             bin_seq_ids.push(seq_id.clone());
                             seq_meta_by_id.insert(
@@ -100,6 +107,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                     width,
                                     height,
                                     fps,
+                                    start_tc_frame,
                                 },
                             );
                         }
@@ -122,6 +130,32 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                     } else {
                         MediaKind::Video
                     };
+                    let (mut width, mut height) = (0u32, 0u32);
+                    let mut asset_fps = Rational::FPS_25;
+                    let mut duration_frames = 0i64;
+                    let mut source_tc_frame = 0i64;
+
+                    if let Some(bvi) = node.descendants().find(|n| n.has_tag_name("BtVideoInfo")) {
+                        if let Some(geo_hex) = child_text(bvi, "Geometry") {
+                            if let Some((w, h)) = decode_bt_geometry(&geo_hex) {
+                                width = w;
+                                height = h;
+                            }
+                        }
+                        if let Some(time_hex) = child_text(bvi, "Time") {
+                            let (sf, nf, fr) = decode_bt_time(&time_hex);
+                            if let Some(s) = sf {
+                                source_tc_frame = s;
+                            }
+                            if let Some(n) = nf {
+                                duration_frames = n;
+                            }
+                            if let Some(f) = fr {
+                                asset_fps = f;
+                            }
+                        }
+                    }
+
                     if !db_id.is_empty() {
                         media_assets.insert(
                             db_id.clone(),
@@ -130,12 +164,12 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                 name,
                                 path: full_path,
                                 media_kind: kind,
-                                width: 1920,
-                                height: 1080,
-                                frame_rate: Rational::FPS_25,
-                                duration_frames: 0,
-                                source_tc_frame: 0,
-                                source_tc_string: "00:00:00:00".into(),
+                                width,
+                                height,
+                                frame_rate: asset_fps,
+                                duration_frames,
+                                source_tc_frame,
+                                source_tc_string: frames_to_timecode(source_tc_frame, asset_fps),
                                 audio_channels: 2,
                                 audio_sample_rate: 48_000,
                                 color_space: None,
@@ -181,9 +215,28 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         let width = meta.map(|m| m.width).unwrap_or(1920);
         let height = meta.map(|m| m.height).unwrap_or(1080);
         let fps = meta.map(|m| m.fps).unwrap_or(Rational::FPS_25);
+        let start_tc_frame = meta.map(|m| m.start_tc_frame).unwrap_or(0);
 
-        let video_tracks = parse_resolve_tracks(root, "VideoTrackVec", TrackKind::Video, width, height, fps);
-        let audio_tracks = parse_resolve_tracks(root, "AudioTrackVec", TrackKind::Audio, width, height, fps);
+        let video_tracks = parse_resolve_tracks(
+            root,
+            "VideoTrackVec",
+            TrackKind::Video,
+            width,
+            height,
+            fps,
+            start_tc_frame,
+            &mut media_assets,
+        );
+        let audio_tracks = parse_resolve_tracks(
+            root,
+            "AudioTrackVec",
+            TrackKind::Audio,
+            width,
+            height,
+            fps,
+            start_tc_frame,
+            &mut media_assets,
+        );
 
         let dur = video_tracks
             .iter()
@@ -200,6 +253,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             height,
             frame_rate: fps,
             duration_frames: dur,
+            start_tc_frame,
             mark_in: None,
             mark_out: None,
             video_tracks,
@@ -222,6 +276,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_resolve_tracks(
     root: Node<'_, '_>,
     vec_tag: &str,
@@ -229,6 +284,8 @@ fn parse_resolve_tracks(
     width: u32,
     height: u32,
     seq_fps: Rational,
+    start_tc_frame: i64,
+    media_assets: &mut BTreeMap<String, MediaAsset>,
 ) -> Vec<Track> {
     let Some(vec_el) = root.children().find(|n| n.has_tag_name(vec_tag)) else {
         return Vec::new();
@@ -259,14 +316,48 @@ fn parse_resolve_tracks(
             "Sm2TiAudioClip"
         };
         let mut clips = Vec::new();
+        let mut transitions = Vec::new();
         if let Some(items_el) = track_el.children().find(|n| n.has_tag_name("Items")) {
             for item_el in items_el.children().filter(|n| n.has_tag_name("Element")) {
+                if let Some(tnode) = item_el.children().find(|n| n.has_tag_name("Sm2TiTransition")) {
+                    let raw_start = child_text(tnode, "Start")
+                        .and_then(|s| s.trim().parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let dur = child_text(tnode, "Duration")
+                        .and_then(|s| s.trim().parse::<i64>().ok())
+                        .unwrap_or(0);
+                    if dur > 0 {
+                        let start = (raw_start - start_tc_frame).max(0);
+                        let ptype = child_text(tnode, "PrettyType")
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| child_text(tnode, "Name").filter(|s| !s.is_empty()))
+                            .unwrap_or_else(|| "Transition".to_string());
+                        let align_code = child_text(tnode, "AlignmentType")
+                            .and_then(|s| s.trim().parse::<u32>().ok())
+                            .unwrap_or(2);
+                        let alignment = match align_code {
+                            1 => "start".to_string(),
+                            3 => "end".to_string(),
+                            _ => "center".to_string(),
+                        };
+                        transitions.push(Transition {
+                            name: ptype.clone(),
+                            effect_id: ptype,
+                            start_frame: start,
+                            end_frame: start + dur,
+                            alignment,
+                        });
+                    }
+                    continue;
+                }
+
                 let Some(cnode) = item_el.children().find(|n| n.has_tag_name(clip_tag)) else {
                     continue;
                 };
-                let start = child_text(cnode, "Start")
+                let raw_start = child_text(cnode, "Start")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or(0);
+                let start = (raw_start - start_tc_frame).max(0);
                 let dur = child_text(cnode, "Duration")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or(0);
@@ -279,6 +370,26 @@ fn parse_resolve_tracks(
                 let media_path = child_text(cnode, "MediaFilePath").unwrap_or_default();
                 let media_id = child_text(cnode, "MediaRef").unwrap_or_else(|| media_path.clone());
                 let cname = child_text(cnode, "Name").unwrap_or_else(|| "Clip".into());
+                let audio_channel = child_text(cnode, "MediaTrackIdx")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .filter(|&c| c > 0)
+                    .unwrap_or(1);
+
+                // Backfill MediaAsset full path when Resolve 21.2 zstd-compressed BtVideoInfo/Clip
+                // could not be unpacked directly from MpFolder.xml.
+                let mut clip_w = width;
+                let mut clip_h = height;
+                if let Some(asset) = media_assets.get_mut(&media_id) {
+                    if !media_path.is_empty()
+                        && (asset.path.is_empty() || asset.path == asset.name)
+                    {
+                        asset.path = media_path.clone();
+                    }
+                    if asset.width > 0 && asset.height > 0 {
+                        clip_w = asset.width;
+                        clip_h = asset.height;
+                    }
+                }
 
                 clips.push(Clip {
                     id: cnode.attribute("DbId").unwrap_or("").to_string(),
@@ -297,12 +408,12 @@ fn parse_resolve_tracks(
                     source_in_ticks: None,
                     source_out_ticks: None,
                     source_fps: clip_fps,
-                    source_width: width,
-                    source_height: height,
+                    source_width: clip_w,
+                    source_height: clip_h,
                     speed_percent: 100.0,
                     reversed: false,
                     enabled: true,
-                    audio_channel: 1,
+                    audio_channel,
                     link_group_id: None,
                     label_name: None,
                     label_preset_index: None,
@@ -324,7 +435,7 @@ fn parse_resolve_tracks(
             muted: disabled,
             solo: false,
             clips,
-            transitions: Vec::new(),
+            transitions,
             markers: Vec::new(),
         });
     }
@@ -376,6 +487,65 @@ fn decode_resolve_resolution(hex: &str) -> Option<(u32, u32)> {
     } else {
         None
     }
+}
+
+fn decode_resolve_media_extents(hex: &str) -> Option<(f64, f64)> {
+    let bytes = hex_decode(hex).ok()?;
+    if bytes.len() < 16 {
+        return None;
+    }
+    let start_sec = f64::from_le_bytes(bytes[0..8].try_into().ok()?);
+    let dur_sec = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    if start_sec.is_finite() && dur_sec.is_finite() {
+        Some((start_sec, dur_sec))
+    } else {
+        None
+    }
+}
+
+fn decode_bt_geometry(hex: &str) -> Option<(u32, u32)> {
+    let raw = hex_decode(hex).ok()?;
+    let fields = decode_keyed_fields(&raw).ok()?;
+    for (k, _, v) in fields {
+        if k == "Resolution" && v.len() >= 16 {
+            let w = u64::from_be_bytes(v[0..8].try_into().ok()?) as u32;
+            let h = u64::from_be_bytes(v[8..16].try_into().ok()?) as u32;
+            if w > 0 && h > 0 {
+                return Some((w, h));
+            }
+        }
+    }
+    None
+}
+
+fn decode_bt_time(hex: &str) -> (Option<i64>, Option<i64>, Option<Rational>) {
+    let mut start_frame = None;
+    let mut num_frames = None;
+    let mut fps = None;
+    let Ok(raw) = hex_decode(hex) else {
+        return (None, None, None);
+    };
+    let Ok(fields) = decode_keyed_fields(&raw) else {
+        return (None, None, None);
+    };
+    for (k, _, v) in fields {
+        match k.as_str() {
+            "StartFrame" if v.len() >= 4 => {
+                start_frame = Some(i32::from_be_bytes(v[0..4].try_into().unwrap()) as i64);
+            }
+            "NumFrames" if v.len() >= 4 => {
+                num_frames = Some(i32::from_be_bytes(v[0..4].try_into().unwrap()) as i64);
+            }
+            "FrameRate" if v.len() >= 8 => {
+                let f = f64::from_le_bytes(v[0..8].try_into().unwrap());
+                if f.is_finite() && f > 0.0 {
+                    fps = Some(Rational::from_fps_approx(f));
+                }
+            }
+            _ => {}
+        }
+    }
+    (start_frame, num_frames, fps)
 }
 
 fn decode_bt_clip_path(hex: &str) -> Option<String> {

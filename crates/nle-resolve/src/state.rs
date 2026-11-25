@@ -59,13 +59,40 @@ fn length_field(field_num: u32, bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Encode Resolve 21 sequence markers into `Sm2SequenceLockableBlob.FieldsBlob` hex.
+/// DaVinci Resolve keys timeline markers by frame, so multiple markers landing on the
+/// same frame are merged into one combined marker rather than silently overwriting each other.
 pub fn encode_timeline_markers(markers: &[Marker]) -> String {
-    let mut sorted: Vec<&Marker> = markers.iter().collect();
-    sorted.sort_by_key(|m| m.frame.max(0));
+    let mut by_frame: BTreeMap<i64, Marker> = BTreeMap::new();
+    for m in markers {
+        let frame = m.frame.max(0);
+        by_frame
+            .entry(frame)
+            .and_modify(|existing| {
+                if !m.name.is_empty() && !existing.name.contains(&m.name) {
+                    if existing.name.is_empty() {
+                        existing.name = m.name.clone();
+                    } else {
+                        existing.name = format!("{} + {}", existing.name, m.name);
+                    }
+                }
+                if !m.comment.is_empty() {
+                    if existing.comment.is_empty() {
+                        existing.comment = m.comment.clone();
+                    } else {
+                        existing.comment = format!("{}\n{}", existing.comment, m.comment);
+                    }
+                }
+                existing.duration_frames = existing.duration_frames.max(m.duration_frames);
+            })
+            .or_insert_with(|| Marker {
+                frame,
+                ..m.clone()
+            });
+    }
 
     let mut entries = Vec::new();
-    for m in sorted {
-        let frame = m.frame.max(0) as u64;
+    for (frame, m) in by_frame {
+        let frame = frame as u64;
         let dur = m.duration_frames.max(1);
         let color_bits = marker_color_bits(&m.color);
 
@@ -202,6 +229,21 @@ pub fn configure_project_color_blob(
         members.insert("project.xml".into(), updated.into_owned().into_bytes());
     }
     Ok(())
+}
+
+/// Build Resolve 21's 422-byte `SequenceSetup` blob for custom per-timeline resolution & frame rate.
+pub fn build_sequence_setup_blob(width: u32, height: u32, fps_int: u32) -> Vec<u8> {
+    const BASE_HEX: &str = "00000000000000030000000000216e6200000000000000000000000000000064000000000000000600000000000004380000000000000780000000000000000000000000000000000000803f00000000000000190000000000000000ffffffffffffffff0000000000000001fffffffffffffffe0000000000000001000000000000000000000000000000c40000000000000005000000000000006d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000004380000000000000780000000000000000000000000000000000000803fffffffffffffffff00000000000000010000000000000221000000000000000000000000000000000000000000000000000000000000000000000000000000000000003f0000003f000000000000004e080a100e1800200840a00172134e6f204f7574707574205472616e73666f726d880144900101c00108e80101880208a80201b00202b8029003c80208e0020ee80202800304a00301a8030eb00301";
+    let mut buf = hex_decode(BASE_HEX).expect("valid SequenceSetup template");
+    let w = (width.max(16) as u64).to_be_bytes();
+    let h = (height.max(16) as u64).to_be_bytes();
+    let f = (fps_int.max(1) as u64).to_be_bytes();
+    buf[40..48].copy_from_slice(&w);
+    buf[48..56].copy_from_slice(&h);
+    buf[76..84].copy_from_slice(&f);
+    buf[244..252].copy_from_slice(&w);
+    buf[252..260].copy_from_slice(&h);
+    buf
 }
 
 /// Patch Resolve 21 `SM_Config` `SetupBA` protobuf fields for default resolution and frame rate.

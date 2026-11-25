@@ -52,6 +52,14 @@ pub fn write_fcp7_xml_file(
     xml.push_str(&format!("    <name>{}</name>\n", esc(&seq.name)));
     xml.push_str(&format!("    <duration>{dur}</duration>\n"));
     xml.push_str(&format!("    <rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate>\n"));
+    if seq.start_tc_frame > 0 {
+        let tc_str = nle_core::frames_to_timecode(seq.start_tc_frame, seq.frame_rate);
+        xml.push_str(&format!(
+            "    <timecode><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><string>{tc_str}</string><frame>{}</frame><displayformat>{}</displayformat></timecode>\n",
+            seq.start_tc_frame,
+            if seq.frame_rate.is_ntsc() { "DF" } else { "NDF" }
+        ));
+    }
     xml.push_str("    <media>\n      <video>\n");
     xml.push_str(&format!(
         "        <format><samplecharacteristics><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><width>{}</width><height>{}</height><pixelaspectratio>square</pixelaspectratio></samplecharacteristics></format>\n",

@@ -77,7 +77,7 @@ pub fn write_otio_file(
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": seq.name,
-        "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": 0.0 },
+        "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": seq.start_tc_frame.max(0) as f64 },
         "metadata": {
             "aagedal_nle_converter": {
                 "project_name": project.name,

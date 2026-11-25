@@ -160,6 +160,33 @@ pub fn analyze_project_effects(
                     }
                 }
             }
+
+            // Non-standard / third-party / app-exclusive transitions
+            for tr in &track.transitions {
+                if is_standard_native_transition(&tr.effect_id, &tr.name) {
+                    continue;
+                }
+                let match_name = if tr.effect_id.is_empty() {
+                    tr.name.clone()
+                } else {
+                    tr.effect_id.clone()
+                };
+                let key = match_name.to_ascii_lowercase();
+                let acc = groups.entry(key).or_insert_with(|| Accum {
+                    match_name,
+                    display_name: tr.name.clone(),
+                    category: EffectCategory::Transition,
+                    media_kind: track.kind,
+                    clip_count: 0,
+                    sample_clips: Vec::new(),
+                    has_keyframes: false,
+                });
+                acc.clip_count += 1;
+                let label = format!("{} @ {}", track.name, tr.start_frame);
+                if acc.sample_clips.len() < 4 && !acc.sample_clips.contains(&label) {
+                    acc.sample_clips.push(label);
+                }
+            }
         }
     }
 
@@ -425,11 +452,120 @@ pub fn apply_effect_decisions(
                     }
                 }
             }
+
+            // Apply decisions to non-standard / third-party / app-exclusive transitions
+            for tr in &track.transitions {
+                if is_standard_native_transition(&tr.effect_id, &tr.name) {
+                    continue;
+                }
+                let match_name = if tr.effect_id.is_empty() {
+                    tr.name.as_str()
+                } else {
+                    tr.effect_id.as_str()
+                };
+                let key = match_name.to_ascii_lowercase();
+                let action = resolved
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(MappingAction::PlaceMarkerOnly);
+                let dur = (tr.end_frame - tr.start_frame).max(1);
+
+                match action {
+                    MappingAction::NativeConvert => {}
+                    MappingAction::MapToEquivalent {
+                        target_display_name,
+                        add_review_marker,
+                        ..
+                    } => {
+                        if inject_markers && add_review_marker {
+                            new_markers.push(Marker {
+                                frame: tr.start_frame,
+                                duration_frames: dur,
+                                name: format!("Transition → {}", target_display_name),
+                                comment: format!(
+                                    "[{track_prefix}] Mapped transition '{}' ({}) → {}",
+                                    tr.name, match_name, target_display_name
+                                ),
+                                color: "Purple".to_string(),
+                                scope: MarkerScope::Sequence,
+                            });
+                            summary.markers_injected += 1;
+                        }
+                        summary.messages.push(ConversionMessage {
+                            severity: Severity::Info,
+                            code: "TR_MAPPED".into(),
+                            sequence: Some(seq.name.clone()),
+                            clip: None,
+                            message: format!(
+                                "Transition '{}' → {} (review marker {})",
+                                tr.name,
+                                target_display_name,
+                                if inject_markers && add_review_marker { "placed" } else { "disabled" }
+                            ),
+                        });
+                    }
+                    MappingAction::PlaceMarkerOnly => {
+                        if inject_markers {
+                            new_markers.push(Marker {
+                                frame: tr.start_frame,
+                                duration_frames: dur,
+                                name: format!("Unmapped Transition: {}", tr.name),
+                                comment: format!(
+                                    "[{track_prefix}] Unmapped transition '{}' ({})",
+                                    tr.name, match_name
+                                ),
+                                color: "Red".to_string(),
+                                scope: MarkerScope::Sequence,
+                            });
+                            summary.markers_injected += 1;
+                        }
+                        summary.messages.push(ConversionMessage {
+                            severity: Severity::Warning,
+                            code: "TR_UNMAPPED".into(),
+                            sequence: Some(seq.name.clone()),
+                            clip: None,
+                            message: format!(
+                                "Unmapped transition '{}' ({}) flagged via timeline marker",
+                                tr.name, match_name
+                            ),
+                        });
+                    }
+                    MappingAction::Skip => {
+                        summary.messages.push(ConversionMessage {
+                            severity: Severity::Info,
+                            code: "TR_SKIPPED".into(),
+                            sequence: Some(seq.name.clone()),
+                            clip: None,
+                            message: format!("Skipped transition '{}' per user choice", tr.name),
+                        });
+                    }
+                }
+            }
         }
         seq.markers.extend(new_markers);
     }
 
     summary
+}
+
+/// Returns true for standard cross-NLE video dissolves and audio crossfades
+/// that translate natively without needing user effect review.
+pub fn is_standard_native_transition(effect_id: &str, name: &str) -> bool {
+    let id = effect_id.to_ascii_lowercase();
+    let nm = name.to_ascii_lowercase();
+    const STANDARD: &[&str] = &[
+        "cross dissolve",
+        "film dissolve",
+        "additive dissolve",
+        "dip to black",
+        "dip to white",
+        "constant power",
+        "constant gain",
+        "exponential fade",
+        "custom fade",
+        "cross fade",
+    ];
+    STANDARD.iter().any(|s| id.contains(s) || nm.contains(s))
 }
 
 #[cfg(test)]
@@ -447,6 +583,7 @@ mod tests {
             height: 1080,
             frame_rate: Rational::FPS_25,
             duration_frames: 250,
+            start_tc_frame: 0,
             mark_in: None,
             mark_out: None,
             video_tracks: vec![Track {

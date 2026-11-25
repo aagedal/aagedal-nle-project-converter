@@ -172,6 +172,10 @@ pub struct Sequence {
     pub height: u32,
     pub frame_rate: Rational,
     pub duration_frames: i64,
+    /// Timeline start timecode offset in sequence frames (e.g. 86400 for 01:00:00:00 @ 24fps).
+    /// All clip/transition/marker frame coordinates inside `Sequence` are 0-based relative to this offset.
+    #[serde(default)]
+    pub start_tc_frame: i64,
     pub mark_in: Option<i64>,
     pub mark_out: Option<i64>,
     pub video_tracks: Vec<Track>,

@@ -6,8 +6,9 @@ use crate::binary::{
 };
 use crate::grade::{build_lumetri_grade_body, build_version_table_xml};
 use crate::state::{
-    append_lockable_blob, clip_color_lockable_blob_xml, configure_project_color_blob,
-    patch_project_setup_defaults, premiere_label_to_resolve_color, sequence_lockable_blob_xml,
+    append_lockable_blob, build_sequence_setup_blob, clip_color_lockable_blob_xml,
+    configure_project_color_blob, patch_project_setup_defaults, premiere_label_to_resolve_color,
+    sequence_lockable_blob_xml,
 };
 use crate::timemap::{build_media_timemap, build_still_timemap, retimed_source_in, STILL_SOURCE_IN};
 use nle_core::{
@@ -181,6 +182,16 @@ pub fn write_drp_file(
     let mut total_markers = 0usize;
     let mut total_grades = 0usize;
 
+    // Choose project default resolution/fps from the first non-empty sequence (avoiding empty template sequences)
+    let primary_seq = selected_sequences
+        .iter()
+        .copied()
+        .find(|s| s.total_clip_count() > 0)
+        .unwrap_or(selected_sequences[0]);
+    let default_w = primary_seq.width;
+    let default_h = primary_seq.height;
+    let default_fps_int = primary_seq.frame_rate.timebase().max(1) as u32;
+
     for seq in &selected_sequences {
         let new_container_id = Uuid::new_v4().to_string();
         let new_seq_db_id = Uuid::new_v4().to_string();
@@ -189,11 +200,12 @@ pub fn write_drp_file(
         let new_unique_seq_id = Uuid::new_v4().to_string();
         let new_unique_mp_id = Uuid::new_v4().to_string();
         let seq_fps = seq.frame_rate.as_f64();
+        let tc_offset = seq.start_tc_frame.max(0);
 
         // Build video tracks XML
         let mut video_tracks_xml = String::new();
         for track in &seq.video_tracks {
-            let mut items_xml = String::new();
+            let mut timed_items: Vec<(i64, u8, String)> = Vec::new();
             for clip in &track.clips {
                 let pkey = path_key(&clip.media_path, &clip.name);
                 let media_ref_id = ensure_media_pool_item(
@@ -215,8 +227,9 @@ pub fn write_drp_file(
                 };
                 let clip_db_id = Uuid::new_v4().to_string();
                 let mut node = replace_root_db_id(chosen_tpl, &clip_db_id);
+                let abs_start = tc_offset + clip.start_frame.max(0);
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
-                node = set_child_text(&node, "Start", &clip.start_frame.max(0).to_string());
+                node = set_child_text(&node, "Start", &abs_start.to_string());
                 node = set_child_text(&node, "Duration", &clip.duration_frames().max(1).to_string());
 
                 let src_fps = clip.source_fps.as_f64();
@@ -284,11 +297,18 @@ pub fn write_drp_file(
                     }
                 }
 
-                items_xml.push_str("<Element>");
-                items_xml.push_str(&node);
-                items_xml.push_str("</Element>");
+                timed_items.push((abs_start, 0, format!("<Element>{node}</Element>")));
                 total_video_clips += 1;
             }
+
+            for tr in &track.transitions {
+                if let Some(tr_xml) = build_resolve_transition_xml(tr, tc_offset, false) {
+                    let abs_start = tc_offset + tr.start_frame.max(0);
+                    timed_items.push((abs_start, 1, format!("<Element>{tr_xml}</Element>")));
+                }
+            }
+            timed_items.sort_by_key(|(s, ord, _)| (*s, *ord));
+            let items_xml: String = timed_items.into_iter().map(|(_, _, x)| x).collect();
 
             let track_xml = build_track_xml(&vtrack_tpl, track, &items_xml, false);
             video_tracks_xml.push_str("<Element>");
@@ -299,7 +319,7 @@ pub fn write_drp_file(
         // Build audio tracks XML
         let mut audio_tracks_xml = String::new();
         for track in &seq.audio_tracks {
-            let mut items_xml = String::new();
+            let mut timed_items: Vec<(i64, u8, String)> = Vec::new();
             for clip in &track.clips {
                 let pkey = path_key(&clip.media_path, &clip.name);
                 let is_video_backed = video_clip_paths.contains(&pkey);
@@ -322,8 +342,9 @@ pub fn write_drp_file(
                 };
                 let clip_db_id = Uuid::new_v4().to_string();
                 let mut node = replace_root_db_id(chosen_tpl, &clip_db_id);
+                let abs_start = tc_offset + clip.start_frame.max(0);
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
-                node = set_child_text(&node, "Start", &clip.start_frame.max(0).to_string());
+                node = set_child_text(&node, "Start", &abs_start.to_string());
                 node = set_child_text(&node, "Duration", &clip.duration_frames().max(1).to_string());
                 node = set_child_text(
                     &node,
@@ -361,11 +382,18 @@ pub fn write_drp_file(
                     }
                 }
 
-                items_xml.push_str("<Element>");
-                items_xml.push_str(&node);
-                items_xml.push_str("</Element>");
+                timed_items.push((abs_start, 0, format!("<Element>{node}</Element>")));
                 total_audio_clips += 1;
             }
+
+            for tr in &track.transitions {
+                if let Some(tr_xml) = build_resolve_transition_xml(tr, tc_offset, true) {
+                    let abs_start = tc_offset + tr.start_frame.max(0);
+                    timed_items.push((abs_start, 1, format!("<Element>{tr_xml}</Element>")));
+                }
+            }
+            timed_items.sort_by_key(|(s, ord, _)| (*s, *ord));
+            let items_xml: String = timed_items.into_iter().map(|(_, _, x)| x).collect();
 
             let track_xml = build_track_xml(&atrack_tpl, track, &items_xml, true);
             audio_tracks_xml.push_str("<Element>");
@@ -420,9 +448,10 @@ pub fn write_drp_file(
         res_bytes.extend_from_slice(&(seq.height as u64).to_be_bytes());
         tl_block = set_child_text(&tl_block, "Resolution", &hex_encode(&res_bytes));
 
+        let start_sec = tc_offset as f64 / seq_fps.max(1.0);
         let dur_sec = seq.computed_duration_frames().max(0) as f64 / seq_fps.max(1.0);
         let mut ext_bytes = Vec::with_capacity(16);
-        ext_bytes.extend_from_slice(&0.0_f64.to_le_bytes());
+        ext_bytes.extend_from_slice(&start_sec.to_le_bytes());
         ext_bytes.extend_from_slice(&dur_sec.to_le_bytes());
         tl_block = set_child_text(&tl_block, "MediaExtents", &hex_encode(&ext_bytes));
 
@@ -436,40 +465,53 @@ pub fn write_drp_file(
             tl_block = set_child_text(&tl_block, &format!("MarkOut{kind}"), &mark_out_str);
         }
 
-        // Rebuild Fairlight audio model for sequence's audio tracks
-        if !seq.audio_tracks.is_empty() {
+        // Rebuild Fairlight audio model and inject custom SequenceSetup (when timeline res/fps differs from project default)
+        let seq_fps_int = seq.frame_rate.timebase().max(1) as u32;
+        let needs_custom_setup =
+            seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
+        if !seq.audio_tracks.is_empty() || needs_custom_setup {
             let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
             if let Some(caps) = re_seq_blob.captures(&tl_block) {
-                let raw_blob = hex_decode(&caps[2])?;
-                let specs: Vec<FairlightTrackSpec> = seq
-                    .audio_tracks
-                    .iter()
-                    .map(|t| FairlightTrackSpec {
-                        is_mono: true,
-                        name: t.name.clone(),
-                        enabled: t.enabled,
-                        locked: t.locked,
-                    })
-                    .collect();
-                match rebuild_fairlight_track_model(&raw_blob, &specs) {
-                    Ok(rebuilt) => {
-                        let m = caps.get(2).unwrap();
-                        let mut updated = String::with_capacity(tl_block.len());
-                        updated.push_str(&tl_block[..m.start()]);
-                        updated.push_str(&hex_encode(&rebuilt));
-                        updated.push_str(&tl_block[m.end()..]);
-                        tl_block = updated;
-                    }
-                    Err(err) => {
-                        messages.push(ConversionMessage {
-                            severity: Severity::Warning,
-                            code: "FAIRLIGHT_MODEL".into(),
-                            sequence: Some(seq.name.clone()),
-                            clip: None,
-                            message: format!("Could not rebuild Fairlight strip model: {err}"),
-                        });
+                let mut blob_bytes = hex_decode(&caps[2])?;
+                if !seq.audio_tracks.is_empty() {
+                    let specs: Vec<FairlightTrackSpec> = seq
+                        .audio_tracks
+                        .iter()
+                        .map(|t| FairlightTrackSpec {
+                            is_mono: true,
+                            name: t.name.clone(),
+                            enabled: t.enabled,
+                            locked: t.locked,
+                        })
+                        .collect();
+                    match rebuild_fairlight_track_model(&blob_bytes, &specs) {
+                        Ok(rebuilt) => blob_bytes = rebuilt,
+                        Err(err) => {
+                            messages.push(ConversionMessage {
+                                severity: Severity::Warning,
+                                code: "FAIRLIGHT_MODEL".into(),
+                                sequence: Some(seq.name.clone()),
+                                clip: None,
+                                message: format!("Could not rebuild Fairlight strip model: {err}"),
+                            });
+                        }
                     }
                 }
+                if needs_custom_setup {
+                    if let Ok(mut kfields) = decode_keyed_fields(&blob_bytes) {
+                        kfields.retain(|(k, _, _)| k != "SequenceSetup");
+                        let setup_blob = build_sequence_setup_blob(seq.width, seq.height, seq_fps_int);
+                        let insert_pos = usize::from(!kfields.is_empty());
+                        kfields.insert(insert_pos, ("SequenceSetup".into(), 12, setup_blob));
+                        blob_bytes = encode_keyed_fields(&kfields);
+                    }
+                }
+                let m = caps.get(2).unwrap();
+                let mut updated = String::with_capacity(tl_block.len());
+                updated.push_str(&tl_block[..m.start()]);
+                updated.push_str(&hex_encode(&blob_bytes));
+                updated.push_str(&tl_block[m.end()..]);
+                tl_block = updated;
             }
         }
 
@@ -492,7 +534,7 @@ pub fn write_drp_file(
         r"(?s)<Element>\s*<(?:Sm2MpVideoClip|Sm2MpAudioClip|Sm2MpTimelineClip)\b.*?</(?:Sm2MpVideoClip|Sm2MpAudioClip|Sm2MpTimelineClip)>\s*</Element>",
     )
     .unwrap();
-    let base_pool = re_strip_items.replace_all(&orig_pool_xml, "").into_owned();
+    let mut base_pool = re_strip_items.replace_all(&orig_pool_xml, "").into_owned();
 
     let mut master_items: Vec<String> = Vec::new();
     if options.include_bins && !project.bins.is_empty() {
@@ -509,6 +551,30 @@ pub fn write_drp_file(
             .collect();
         let bins_by_id: HashMap<&str, &nle_core::ProjectBin> =
             project.bins.iter().map(|b| (b.id.as_str(), b)).collect();
+
+        // Map each parent Sm2MpFolder DbId -> direct child folder DbIds (required in parent FieldsBlob field 2 for Resolve 21!)
+        let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
+        for b in &project.bins {
+            let folder_id = folder_db_ids[b.id.as_str()].clone();
+            let parent_folder_id = b
+                .parent_id
+                .as_deref()
+                .and_then(|pid| folder_db_ids.get(pid))
+                .cloned()
+                .unwrap_or_else(|| master_id.clone());
+            children_by_parent
+                .entry(parent_folder_id)
+                .or_default()
+                .push(folder_id);
+        }
+
+        if let Some(master_children) = children_by_parent.get(&master_id) {
+            if let Some(orig_master_blob) = extract_tag_inner(&base_pool, "FieldsBlob") {
+                let updated_master_blob =
+                    inject_child_folders_into_blob(&orig_master_blob, master_children);
+                base_pool = set_child_text(&base_pool, "FieldsBlob", &updated_master_blob);
+            }
+        }
 
         let mut media_to_bin: HashMap<String, String> = HashMap::new();
         let mut seq_to_bin: HashMap<String, String> = HashMap::new();
@@ -561,9 +627,13 @@ pub fn write_drp_file(
                 .get(b.id.as_str())
                 .map(|v| v.join("\n"))
                 .unwrap_or_default();
+            let this_blob = children_by_parent
+                .get(folder_id)
+                .map(|kids| inject_child_folders_into_blob(folder_blob, kids))
+                .unwrap_or_else(|| folder_blob.to_string());
 
             let bin_xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Sm2MpFolder DbId=\"{folder_id}\"><FieldsBlob>{folder_blob}</FieldsBlob><Name>{}</Name><MpFolder>{parent_folder_id}</MpFolder><UniqueMediaPoolItemId>{}</UniqueMediaPoolItemId><MediaVec>{moved_xml}</MediaVec><MediaPool>{media_pool_id}</MediaPool><Folded>true</Folded><ColorTag>FOLDER_COLOR_NONE</ColorTag><LockSysId/><DbSavedTime>0</DbSavedTime></Sm2MpFolder>\n",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!--DbAppVer=\"21.0.2.0004\" DbPrjVer=\"17\"-->\n<Sm2MpFolder DbId=\"{folder_id}\"><FieldsBlob>{this_blob}</FieldsBlob><Name>{}</Name><MpFolder>{parent_folder_id}</MpFolder><UniqueMediaPoolItemId>{}</UniqueMediaPoolItemId><MediaVec>{moved_xml}</MediaVec><MediaPool>{media_pool_id}</MediaPool><Folded>true</Folded><ColorTag>FOLDER_COLOR_NONE</ColorTag><LockSysId/><DbSavedTime>0</DbSavedTime></Sm2MpFolder>\n",
                 xml_escape(&b.name),
                 Uuid::new_v4(),
             );
@@ -597,12 +667,11 @@ pub fn write_drp_file(
         project_xml = append_lockable_blob(&project_xml, blob)?;
     }
 
-    let first_seq = selected_sequences[0];
     project_xml = patch_project_setup_defaults(
         &project_xml,
-        first_seq.width,
-        first_seq.height,
-        first_seq.frame_rate.timebase().max(1) as u32,
+        default_w,
+        default_h,
+        default_fps_int,
     )?;
 
     let out_name = options
@@ -941,6 +1010,63 @@ fn build_static_motion_payload(
     Some(encode_wrapper_hex(&outer))
 }
 
+fn build_resolve_transition_xml(
+    tr: &nle_core::Transition,
+    tc_offset: i64,
+    is_audio: bool,
+) -> Option<String> {
+    let dur = tr.end_frame - tr.start_frame;
+    if dur <= 0 {
+        return None;
+    }
+    let id_lower = tr.effect_id.to_ascii_lowercase();
+    let nm_lower = tr.name.to_ascii_lowercase();
+
+    let pretty_type = if is_audio {
+        if id_lower.contains("constant power") || nm_lower.contains("constant power") {
+            "Cross Fade +3DB"
+        } else if id_lower.contains("constant gain")
+            || nm_lower.contains("constant gain")
+            || id_lower.contains("exponential")
+            || nm_lower.contains("exponential")
+            || id_lower.contains("custom fade")
+            || nm_lower.contains("custom fade")
+            || id_lower.contains("cross fade")
+            || nm_lower.contains("cross fade")
+        {
+            "Cross Fade 0DB"
+        } else {
+            return None;
+        }
+    } else if id_lower.contains("cross dissolve")
+        || nm_lower.contains("cross dissolve")
+        || id_lower.contains("film dissolve")
+        || nm_lower.contains("film dissolve")
+        || id_lower.contains("additive dissolve")
+        || nm_lower.contains("additive dissolve")
+        || id_lower.contains("dip to black")
+        || nm_lower.contains("dip to black")
+        || id_lower.contains("dip to white")
+        || nm_lower.contains("dip to white")
+    {
+        "Cross Dissolve"
+    } else {
+        return None;
+    };
+
+    let align_code = match tr.alignment.as_str() {
+        "start" => 1,
+        "end" => 3,
+        _ => 2,
+    };
+    let abs_start = tc_offset + tr.start_frame.max(0);
+    let db_id = Uuid::new_v4();
+
+    Some(format!(
+        "<Sm2TiTransition DbId=\"{db_id}\"><FieldsBlob/><PrettyType>{pretty_type}</PrettyType><Name>Transition</Name><Start>{abs_start}</Start><Duration>{dur}</Duration><LinkedItemSync/><WasDisbanded>false</WasDisbanded><MarkersBA/><UiMemento>0</UiMemento><Flags>0</Flags><PriorityIndex>0</PriorityIndex><EffectFiltersBA/><ImportExportMetadataBA/><RenderTextEnabled>true</RenderTextEnabled><RenderTextGanged>true</RenderTextGanged><RenderTextPrefixed>true</RenderTextPrefixed><AlignmentType>{align_code}</AlignmentType><Position>{align_code}</Position></Sm2TiTransition>"
+    ))
+}
+
 fn build_track_xml(
     track_tpl: &str,
     track: &nle_core::Track,
@@ -963,6 +1089,28 @@ fn build_track_xml(
         | if !track.enabled || track.muted { 2 } else { 0 };
     node = set_child_text(&node, "Flags", &flags.to_string());
     node
+}
+
+/// Inject Resolve 21's child subfolder registry (protobuf field 2 keyed-dict `"0" -> childDbId`, ...)
+/// into a parent `Sm2MpFolder`'s `<FieldsBlob>` so DaVinci Resolve discovers all child bins on import.
+fn inject_child_folders_into_blob(blob_hex: &str, child_folder_ids: &[String]) -> String {
+    if child_folder_ids.is_empty() {
+        return blob_hex.to_string();
+    }
+    let Ok(raw) = decode_wrapper_hex(blob_hex) else {
+        return blob_hex.to_string();
+    };
+    let Ok(mut fields) = decode_protobuf(&raw) else {
+        return blob_hex.to_string();
+    };
+    fields.retain(|f| f.number != 2);
+    let entries: Vec<(String, u32, Vec<u8>)> = child_folder_ids
+        .iter()
+        .enumerate()
+        .map(|(i, cid)| (i.to_string(), 10, encode_utf16be(cid)))
+        .collect();
+    fields.insert(0, ProtoField::bytes(2, encode_keyed_fields(&entries)));
+    encode_wrapper_hex(&encode_protobuf(&fields))
 }
 
 fn resolve_bin_zip_path(

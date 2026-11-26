@@ -266,6 +266,27 @@ impl<'a> PrprojBuilder<'a> {
             }
         }
 
+        // Build merged custom metadata schema (declared project schema + any asset/bin custom keys)
+        let mut custom_schema = project.custom_metadata_schema.clone();
+        for asset in &project.media_assets {
+            for key in asset.custom_metadata.keys() {
+                if is_valid_xml_tag_name(key) {
+                    custom_schema
+                        .entry(key.clone())
+                        .or_insert_with(|| key.replace('.', " "));
+                }
+            }
+        }
+        for bin in &project.bins {
+            for key in bin.custom_metadata.keys() {
+                if is_valid_xml_tag_name(key) {
+                    custom_schema
+                        .entry(key.clone())
+                        .or_insert_with(|| key.replace('.', " "));
+                }
+            }
+        }
+
         // 2. Emit Project root + Settings + CompileSettings + ScratchDiskSettings + Ingest + Workspace
         let primary_fps = sequences
             .first()
@@ -277,6 +298,7 @@ impl<'a> PrprojBuilder<'a> {
             project.scale_to_frame_size,
             primary_fps,
             &open_seq_uids,
+            &custom_schema,
         );
 
         // 3. Emit Media assets + MasterClips + ClipProjectItems
@@ -335,6 +357,8 @@ impl<'a> PrprojBuilder<'a> {
                         audio_channels: 2,
                         audio_sample_rate: 48_000,
                         color_space: None,
+                        metadata: BTreeMap::new(),
+                        custom_metadata: BTreeMap::new(),
                     });
                 }
             }
@@ -391,6 +415,7 @@ impl<'a> PrprojBuilder<'a> {
         scale_to_frame_size: bool,
         primary_fps: Rational,
         open_seq_uids: &[String],
+        custom_schema: &BTreeMap<String, String>,
     ) {
         let proj_settings_id = self.alloc_id();
         let movie_cs_id = self.alloc_id();
@@ -410,6 +435,28 @@ impl<'a> PrprojBuilder<'a> {
             ));
         }
 
+        let schema_prop = if custom_schema.is_empty() {
+            String::new()
+        } else {
+            let mut xmp = String::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<xmp_definitions>\n\t<xmp_schema namespace=\"http://ns.adobe.com/premierePrivateProjectMetaData/1.0/\" prefix=\"premierePrivateProjectMetaData\" label=\"$$$/Premiere/PrivateProProjectMetaData_label=Premiere Project Metadata\">\n",
+            );
+            for (name, label) in custom_schema {
+                if is_valid_xml_tag_name(name) {
+                    xmp.push_str(&format!(
+                        "\t\t<xmp_property category=\"external\" name=\"{}\" type=\"text\" label=\"{}\" />\n",
+                        xml_escape(name),
+                        xml_escape(label)
+                    ));
+                }
+            }
+            xmp.push_str("\t</xmp_schema>\n</xmp_definitions>");
+            format!(
+                "\t\t\t\t<Project.Metadata.Schema>{}</Project.Metadata.Schema>\n",
+                xml_escape(&xmp)
+            )
+        };
+
         self.push(format!(
             "\t<Project ObjectID=\"1\" ClassID=\"62ad66dd-0dcd-42da-a660-6d8fbde94876\" Version=\"45\">\n\
              \t\t<Node Version=\"1\">\n\
@@ -417,6 +464,7 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t\t<MZ.Project.GUID>{project_guid}</MZ.Project.GUID>\n\
              \t\t\t\t<MZ.Project.ApplicationID>PremierePro</MZ.Project.ApplicationID>\n\
              \t\t\t\t<TL.PJSnappingState>true</TL.PJSnappingState>\n\
+             {schema_prop}\
              {open_seq_props}\
              \t\t\t</Properties>\n\
              \t\t</Node>\n\
@@ -718,9 +766,17 @@ impl<'a> PrprojBuilder<'a> {
         let td = video_time_display_format(fps);
         let media_out_ticks = start_tc_ticks + dur_ticks;
         let log_rate = if is_video { frame_ticks } else { sample_ticks };
+        let mut extra_log = String::new();
+        if let Some(desc) = asset.metadata.get("Description").filter(|s| !s.is_empty()) {
+            extra_log.push_str(&format!("\t\t<Description>{}</Description>\n", xml_escape(desc)));
+        }
+        if let Some(tape) = asset.metadata.get("Tape Name").filter(|s| !s.is_empty()) {
+            extra_log.push_str(&format!("\t\t<TapeName>{}</TapeName>\n", xml_escape(tape)));
+        }
         self.push(format!(
             "\t<ClipLoggingInfo ObjectID=\"{log_id}\" ClassID=\"77ab7fdd-dcdf-465d-9906-7a330ca1e738\" Version=\"10\">\n\
              \t\t<ClipName>{escaped_name}</ClipName>\n\
+             {extra_log}\
              \t\t<MediaInPoint>{start_tc_ticks}</MediaInPoint>\n\
              \t\t<MediaOutPoint>{media_out_ticks}</MediaOutPoint>\n\
              \t\t<MediaFrameRate>{log_rate}</MediaFrameRate>\n\
@@ -827,12 +883,31 @@ impl<'a> PrprojBuilder<'a> {
         } else {
             "BE.Prefs.LabelColors.2"
         };
+        let mut cpi_props = format!(
+            "\t\t\t\t\t<Column.PropertyText.Label>{default_label}</Column.PropertyText.Label>\n"
+        );
+        for (k, v) in &asset.metadata {
+            if v.is_empty() {
+                continue;
+            }
+            if let Some(col_tag) = canonical_meta_to_premiere_column_tag(k) {
+                cpi_props.push_str(&format!(
+                    "\t\t\t\t\t<{col_tag}>{}</{col_tag}>\n",
+                    xml_escape(v)
+                ));
+            }
+        }
+        for (k, v) in &asset.custom_metadata {
+            if !v.is_empty() && is_valid_xml_tag_name(k) {
+                cpi_props.push_str(&format!("\t\t\t\t\t<{k}>{}</{k}>\n", xml_escape(v)));
+            }
+        }
         self.push(format!(
             "\t<ClipProjectItem ObjectUID=\"{clip_project_item_uid}\" ClassID=\"cb4e0ed7-aca1-4171-8525-e3658dec06dd\" Version=\"1\">\n\
              \t\t<ProjectItem Version=\"1\">\n\
              \t\t\t<Node Version=\"1\">\n\
              \t\t\t\t<Properties Version=\"1\">\n\
-             \t\t\t\t\t<Column.PropertyText.Label>{default_label}</Column.PropertyText.Label>\n\
+             {cpi_props}\
              \t\t\t\t</Properties>\n\
              \t\t\t</Node>\n\
              \t\t\t<Name>{escaped_name}</Name>\n\
@@ -2569,7 +2644,7 @@ impl<'a> PrprojBuilder<'a> {
                         }
                     }
                 }
-                self.emit_bin_item(&buid, &bin.name, &items);
+                self.emit_bin_item(&buid, &bin.name, &items, &bin.custom_metadata);
                 report.bins_created += 1;
             }
         }
@@ -2618,12 +2693,24 @@ impl<'a> PrprojBuilder<'a> {
         ));
     }
 
-    fn emit_bin_item(&mut self, uid: &str, name: &str, item_uids: &[String]) {
+    fn emit_bin_item(
+        &mut self,
+        uid: &str,
+        name: &str,
+        item_uids: &[String],
+        custom_metadata: &BTreeMap<String, String>,
+    ) {
         let mut items_xml = String::new();
         for (i, child_uid) in item_uids.iter().enumerate() {
             items_xml.push_str(&format!(
                 "\t\t\t\t<Item Index=\"{i}\" ObjectURef=\"{child_uid}\" />\n"
             ));
+        }
+        let mut extra_props = String::new();
+        for (k, v) in custom_metadata {
+            if !v.is_empty() && is_valid_xml_tag_name(k) {
+                extra_props.push_str(&format!("\t\t\t\t\t<{k}>{}</{k}>\n", xml_escape(v)));
+            }
         }
         self.push(format!(
             "\t<BinProjectItem ObjectUID=\"{uid}\" ClassID=\"dbfd6653-24da-480e-a35e-ba45e9504e4b\" Version=\"1\">\n\
@@ -2631,6 +2718,7 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t<Node Version=\"1\">\n\
              \t\t\t\t<Properties Version=\"1\">\n\
              \t\t\t\t\t<Column.PropertyText.Label>BE.Prefs.LabelColors.7</Column.PropertyText.Label>\n\
+             {extra_props}\
              \t\t\t\t</Properties>\n\
              \t\t\t</Node>\n\
              \t\t\t<Name>{}</Name>\n\
@@ -2773,6 +2861,35 @@ fn marker_color_to_premiere_argb(color: &str) -> Option<u32> {
         _ => return None,
     };
     Some(val)
+}
+
+fn canonical_meta_to_premiere_column_tag(key: &str) -> Option<&'static str> {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "description" => Some("Column.PropertyText.Description"),
+        "comments" | "comment" => Some("Column.PropertyText.Comment"),
+        "log note" => Some("Column.PropertyText.LogNote"),
+        "scene" => Some("Column.PropertyText.Scene"),
+        "shot" => Some("Column.PropertyText.Shot"),
+        "take" => Some("Column.PropertyText.Take"),
+        "keywords" => Some("Column.PropertyText.Keywords"),
+        "client" => Some("Column.PropertyText.Client"),
+        "tape name" => Some("Column.PropertyText.TapeName"),
+        "good take" => Some("Column.PropertyText.Good"),
+        "angle" => Some("Column.PropertyText.CameraAngle"),
+        "camera #" => Some("Column.PropertyText.CameraLabel"),
+        _ => None,
+    }
+}
+
+fn is_valid_xml_tag_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 fn xml_escape(input: &str) -> String {

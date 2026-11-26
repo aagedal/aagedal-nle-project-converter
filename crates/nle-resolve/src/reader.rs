@@ -2,7 +2,9 @@ use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
 };
-use crate::state::{decode_lockable_blob, resolve_color_to_premiere_label};
+use crate::state::{
+    decode_lockable_blob, decode_media_metadata_blob, resolve_color_to_premiere_label,
+};
 use crate::timemap::decode_media_timemap_detail;
 use nle_core::{
     frames_to_timecode, Clip, ClipSourceKind, ColorConfig, Marker, MarkerScope, MediaAsset,
@@ -58,10 +60,12 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback_name);
 
-    // Decode sequence markers and per-clip markers/colors from project.xml LockableBlobs.
+    // Decode sequence markers, per-clip markers/colors, and MediaPool clip metadata from project.xml LockableBlobs.
     let mut seq_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
     let mut clip_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
     let mut clip_color_by_id: HashMap<String, u32> = HashMap::new();
+    let mut media_meta_by_info_id: HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
+        HashMap::new();
     if let Some(proj_xml) = members.get("project.xml") {
         let sanitized = sanitize_resolve_xml(proj_xml);
         if let Ok(doc) = Document::parse(&sanitized) {
@@ -90,6 +94,18 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                             }
                             if let Some(c) = color {
                                 clip_color_by_id.insert(owner, c);
+                            }
+                        }
+                    }
+                    "BtMetadataLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (std_m, custom_m) = decode_media_metadata_blob(&hex);
+                            if !std_m.is_empty() || !custom_m.is_empty() {
+                                let entry = media_meta_by_info_id.entry(owner).or_default();
+                                entry.0.extend(std_m);
+                                entry.1.extend(custom_m);
                             }
                         }
                     }
@@ -230,6 +246,20 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                         }
                     }
 
+                    let mut item_std_meta = BTreeMap::new();
+                    let mut item_custom_meta = BTreeMap::new();
+                    for info_node in node
+                        .descendants()
+                        .filter(|n| n.has_tag_name("BtVideoInfo") || n.has_tag_name("BtAudioInfo"))
+                    {
+                        if let Some(info_id) = info_node.attribute("DbId") {
+                            if let Some((sm, cm)) = media_meta_by_info_id.get(info_id) {
+                                item_std_meta.extend(sm.clone());
+                                item_custom_meta.extend(cm.clone());
+                            }
+                        }
+                    }
+
                     if !db_id.is_empty() {
                         media_assets.insert(
                             db_id.clone(),
@@ -247,6 +277,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                 audio_channels: 2,
                                 audio_sample_rate: 48_000,
                                 color_space: None,
+                                metadata: item_std_meta,
+                                custom_metadata: item_custom_meta,
                             },
                         );
                     }
@@ -262,6 +294,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                 parent_id,
                 media_paths: bin_media_paths,
                 sequence_ids: bin_seq_ids,
+                custom_metadata: BTreeMap::new(),
             });
         }
     }
@@ -347,6 +380,15 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         });
     }
 
+    let mut custom_metadata_schema = BTreeMap::new();
+    for asset in media_assets.values() {
+        for key in asset.custom_metadata.keys() {
+            custom_metadata_schema
+                .entry(key.clone())
+                .or_insert_with(|| key.replace('.', " "));
+        }
+    }
+
     Ok(Project {
         name: project_name,
         source_format: NleFormat::DaVinciResolve,
@@ -357,6 +399,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         media_assets: media_assets.into_values().collect(),
         sequences,
         metadata: BTreeMap::new(),
+        custom_metadata_schema,
     })
 }
 

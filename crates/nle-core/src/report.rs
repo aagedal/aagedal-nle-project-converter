@@ -32,11 +32,17 @@ pub struct ConversionOptions {
     pub project_name: Option<String>,
     pub selected_sequence_ids: Vec<String>,
     pub include_bins: bool,
+    #[serde(default = "default_true")]
+    pub include_unused_media: bool,
     pub include_markers: bool,
     pub include_clip_colors: bool,
     pub include_lumetri_grades: bool,
     pub inject_effect_review_markers: bool,
     pub relink_rules: Vec<PathRelinkRule>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ConversionOptions {
@@ -46,6 +52,7 @@ impl Default for ConversionOptions {
             project_name: None,
             selected_sequence_ids: Vec::new(),
             include_bins: true,
+            include_unused_media: true,
             include_markers: true,
             include_clip_colors: true,
             include_lumetri_grades: true,

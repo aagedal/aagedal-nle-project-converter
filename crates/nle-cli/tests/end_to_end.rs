@@ -16,6 +16,26 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     nle_premiere::write_sample_prproj(&prproj_path).expect("write demo .prproj");
     let mut project = nle_premiere::read_prproj_file(&prproj_path).expect("read demo .prproj");
 
+    // Attach standard file metadata + custom third-party project metadata to verify
+    // Premiere <-> Resolve transfer AND verify custom metadata does NOT leak into other NLE formats.
+    project
+        .custom_metadata_schema
+        .insert("External.Item.Id".into(), "External Item ID".into());
+    project
+        .custom_metadata_schema
+        .insert("External.Artifact".into(), "External Artifact".into());
+    if let Some(asset) = project.media_assets.first_mut() {
+        asset
+            .metadata
+            .insert("Description".into(), "Studio interview A-cam".into());
+        asset
+            .custom_metadata
+            .insert("External.Item.Id".into(), "ext-item-12345".into());
+        asset
+            .custom_metadata
+            .insert("External.Artifact".into(), r#"{"id":"art-99"}"#.into());
+    }
+
     let inspection = ProjectInspection::from_project(&project);
     assert_eq!(inspection.sequences.len(), 1);
     assert_eq!(inspection.bin_count, 2);
@@ -62,6 +82,17 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     assert_eq!(resolve_project.source_format, NleFormat::DaVinciResolve);
     assert_eq!(resolve_project.sequences.len(), 1);
     assert_eq!(resolve_project.sequences[0].video_tracks[0].clips.len(), 2);
+    // Verify standard + custom/third-party metadata survived Premiere -> Resolve
+    assert!(
+        resolve_project.media_assets.iter().any(|a| {
+            a.metadata.get("Description").map(String::as_str) == Some("Studio interview A-cam")
+                && a.custom_metadata.get("External.Item.Id").map(String::as_str)
+                    == Some("ext-item-12345")
+                && a.custom_metadata.get("External.Artifact").map(String::as_str)
+                    == Some(r#"{"id":"art-99"}"#)
+        }),
+        "expected standard & custom metadata on Resolve media asset"
+    );
 
     let fcp_rep = nle_interchange::write_fcpxml_file(&resolve_project, &fcpxml_path, &opts)
         .expect("write .fcpxml from .drp");
@@ -74,6 +105,16 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     let xmeml_rep = nle_interchange::write_fcp7_xml_file(&resolve_project, &fcp7_path, &opts)
         .expect("write FCP7 .xml from .drp");
     assert_eq!(xmeml_rep.video_clips_converted, 2);
+
+    // Verify custom/third-party MAM metadata does NOT leak into non-Resolve/Premiere formats
+    for other_path in [&fcpxml_path, &otio_path, &fcp7_path] {
+        let content = std::fs::read_to_string(other_path).expect("read interchange output");
+        assert!(
+            !content.contains("External.Item.Id") && !content.contains("ext-item-12345"),
+            "custom metadata must not leak into {:?}",
+            other_path
+        );
+    }
 
     // 6. Native Resolve .drp -> Adobe Premiere Pro .prproj conversion + re-read!
     let back_prproj_path = dir.join("from_resolve.prproj");
@@ -93,6 +134,16 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     assert_eq!(reread_prproj.sequences.len(), 1);
     assert_eq!(reread_prproj.sequences[0].video_tracks[0].clips.len(), 2);
     assert!(!reread_prproj.sequences[0].markers.is_empty());
+    assert!(
+        reread_prproj.media_assets.iter().any(|a| {
+            a.metadata.get("Description").map(String::as_str) == Some("Studio interview A-cam")
+                && a.custom_metadata.get("External.Item.Id").map(String::as_str)
+                    == Some("ext-item-12345")
+                && a.custom_metadata.get("External.Artifact").map(String::as_str)
+                    == Some(r#"{"id":"art-99"}"#)
+        }),
+        "expected standard & custom metadata on round-tripped Premiere media asset"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

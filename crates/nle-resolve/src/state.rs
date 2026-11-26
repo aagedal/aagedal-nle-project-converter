@@ -343,6 +343,234 @@ pub fn clip_color_lockable_blob_xml(clip_db_id: &str, resolve_color: u32) -> Str
     )
 }
 
+/// Resolve standard MediaPoolItem metadata enum IDs (verified in Resolve Studio 21.2).
+pub fn resolve_meta_enum_to_name(enum_id: u64) -> Option<&'static str> {
+    match enum_id {
+        64 => Some("Description"),
+        65 => Some("Comments"),
+        66 => Some("Scene"),
+        67 => Some("Shot"),
+        68 => Some("Take"),
+        69 => Some("Angle"),
+        74 => Some("Keywords"),
+        78 => Some("Shoot Day"),
+        80 => Some("Camera #"),
+        88 => Some("Location"),
+        96 => Some("Camera Manufacturer"),
+        97 => Some("Camera Type"),
+        100 => Some("Camera Notes"),
+        107 => Some("ISO"),
+        115 => Some("LUT Used"),
+        116 => Some("Lens Type"),
+        211 => Some("Audio Notes"),
+        304 => Some("Production Name"),
+        336 => Some("Director"),
+        _ => None,
+    }
+}
+
+/// Map canonical clip metadata field name to Resolve's `BtMetadataLockableBlob` enum ID.
+pub fn name_to_resolve_meta_enum(name: &str) -> Option<u64> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "description" => Some(64),
+        "comments" | "comment" => Some(65),
+        "scene" => Some(66),
+        "shot" => Some(67),
+        "take" => Some(68),
+        "angle" => Some(69),
+        "keywords" | "keyword" => Some(74),
+        "shoot day" => Some(78),
+        "camera #" | "camera" => Some(80),
+        "location" => Some(88),
+        "camera manufacturer" => Some(96),
+        "camera type" => Some(97),
+        "camera notes" => Some(100),
+        "iso" => Some(107),
+        "lut used" => Some(115),
+        "lens type" => Some(116),
+        "audio notes" => Some(211),
+        "production name" => Some(304),
+        "director" => Some(336),
+        _ => None,
+    }
+}
+
+/// Encode Resolve 21.2 `BtMetadataLockableBlob` XML for a Media Pool clip's standard metadata
+/// (`f2` enum entries) and third-party/custom metadata (`f4` string key-value entries).
+/// `info_db_id` must be the `DbId` of the clip's `<BtVideoInfo>` (or `<BtAudioInfo>` for audio-only).
+pub fn media_metadata_lockable_blob_xml(
+    info_db_id: &str,
+    std_meta: &BTreeMap<String, String>,
+    custom_meta: &BTreeMap<String, String>,
+) -> Option<String> {
+    if info_db_id.is_empty() || (std_meta.is_empty() && custom_meta.is_empty()) {
+        return None;
+    }
+
+    let mut std_by_enum: BTreeMap<u64, String> = BTreeMap::new();
+    let mut extra_third_party: BTreeMap<String, String> = custom_meta.clone();
+
+    for (k, v) in std_meta {
+        if v.is_empty() {
+            continue;
+        }
+        if let Some(eid) = name_to_resolve_meta_enum(k) {
+            std_by_enum.entry(eid).or_insert_with(|| v.clone());
+        } else if k.eq_ignore_ascii_case("log note") && !std_by_enum.contains_key(&65) {
+            std_by_enum.insert(65, v.clone());
+        } else {
+            // Preserve unmapped file metadata fields in ThirdPartyMetadata so nothing is lost.
+            extra_third_party.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    if std_by_enum.is_empty() && extra_third_party.is_empty() {
+        return None;
+    }
+
+    let mut inner = Vec::new();
+    for (eid, val) in &std_by_enum {
+        let entry = encode_protobuf(&[
+            ProtoField::varint(1, *eid),
+            ProtoField::bytes(2, val.as_bytes().to_vec()),
+        ]);
+        inner.extend_from_slice(&length_field(2, &entry));
+    }
+    for (k, v) in &extra_third_party {
+        if k.is_empty() {
+            continue;
+        }
+        let entry = encode_protobuf(&[
+            ProtoField::bytes(1, k.as_bytes().to_vec()),
+            ProtoField::bytes(2, v.as_bytes().to_vec()),
+        ]);
+        inner.extend_from_slice(&length_field(4, &entry));
+    }
+
+    // 8-byte BtMetadata header: [1_000_001 (0x000f4241): u32be][inner_len: u32be]
+    let mut wrapped_inner = Vec::with_capacity(8 + inner.len());
+    wrapped_inner.extend_from_slice(&1_000_001u32.to_be_bytes());
+    wrapped_inner.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+    wrapped_inner.extend_from_slice(&inner);
+
+    let proto = length_field(2, &wrapped_inner);
+    let mut blob_data = Vec::with_capacity(9 + proto.len());
+    blob_data.extend_from_slice(&10001u32.to_be_bytes());
+    blob_data.extend_from_slice(&((proto.len() + 1) as u32).to_be_bytes());
+    blob_data.push(0x80);
+    blob_data.extend_from_slice(&proto);
+
+    let key = encode_utf16be("BlobData");
+    let mut fields_blob = Vec::new();
+    fields_blob.extend_from_slice(&1u32.to_be_bytes());
+    fields_blob.extend_from_slice(&1u32.to_be_bytes());
+    fields_blob.extend_from_slice(&(key.len() as u32).to_be_bytes());
+    fields_blob.extend_from_slice(&key);
+    fields_blob.extend_from_slice(&12u32.to_be_bytes());
+    fields_blob.push(0);
+    fields_blob.extend_from_slice(&(blob_data.len() as u32).to_be_bytes());
+    fields_blob.extend_from_slice(&blob_data);
+
+    let hex = hex_encode(&fields_blob);
+    let blob_id = Uuid::new_v4();
+    Some(format!(
+        "<Element><BtMetadataLockableBlob DbId=\"{blob_id}\"><FieldsBlob>{hex}</FieldsBlob><BlobOwner>{info_db_id}</BlobOwner><DbSavedTime>0</DbSavedTime></BtMetadataLockableBlob></Element>"
+    ))
+}
+
+/// Decode Resolve `BtMetadataLockableBlob` `FieldsBlob` hex (`0x80` raw or `0x81` zstd)
+/// into `(standard_metadata, third_party_custom_metadata)`.
+pub fn decode_media_metadata_blob(
+    fields_blob_hex: &str,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut std_meta = BTreeMap::new();
+    let mut custom_meta = BTreeMap::new();
+
+    let Ok(raw) = hex_decode(fields_blob_hex) else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(entries) = decode_keyed_fields(&raw) else {
+        return (std_meta, custom_meta);
+    };
+    let Some(blob_data) = entries
+        .into_iter()
+        .find(|(k, _, _)| k == "BlobData")
+        .map(|(_, _, v)| v)
+    else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(proto_bytes) = decode_wrapper_bytes(&blob_data) else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(top_fields) = decode_protobuf(&proto_bytes) else {
+        return (std_meta, custom_meta);
+    };
+
+    for f in top_fields {
+        if f.number != 2 {
+            continue;
+        }
+        let ProtoValue::Bytes(wrapped) = f.value else {
+            continue;
+        };
+        if wrapped.len() < 8 {
+            continue;
+        }
+        let Ok(inner_fields) = decode_protobuf(&wrapped[8..]) else {
+            continue;
+        };
+        for inf in inner_fields {
+            match (inf.number, inf.value) {
+                (2, ProtoValue::Bytes(entry_bytes)) => {
+                    if let Ok(sub) = decode_protobuf(&entry_bytes) {
+                        let mut eid: Option<u64> = None;
+                        let mut val: Option<String> = None;
+                        for sf in sub {
+                            match (sf.number, sf.value) {
+                                (1, ProtoValue::Varint(v)) => eid = Some(v),
+                                (2, ProtoValue::Bytes(b)) => {
+                                    val = Some(String::from_utf8_lossy(&b).into_owned());
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let (Some(id), Some(v)) = (eid, val) {
+                            if !v.is_empty() {
+                                if let Some(name) = resolve_meta_enum_to_name(id) {
+                                    std_meta.insert(name.to_string(), v);
+                                }
+                            }
+                        }
+                    }
+                }
+                (4, ProtoValue::Bytes(entry_bytes)) => {
+                    if let Ok(sub) = decode_protobuf(&entry_bytes) {
+                        let mut k: Option<String> = None;
+                        let mut v: Option<String> = None;
+                        for sf in sub {
+                            if let ProtoValue::Bytes(b) = sf.value {
+                                match sf.number {
+                                    1 => k = Some(String::from_utf8_lossy(&b).into_owned()),
+                                    2 => v = Some(String::from_utf8_lossy(&b).into_owned()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let (Some(key), Some(val)) = (k, v) {
+                            if !key.is_empty() {
+                                custom_meta.insert(key, val);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (std_meta, custom_meta)
+}
+
 pub fn append_lockable_blob(project_xml: &str, blob_xml: &str) -> NleResult<String> {
     let Some(pos) = project_xml.find("</LocableBlobSet>") else {
         return Err(NleError::InvalidFormat("project.xml missing </LocableBlobSet>".into()));

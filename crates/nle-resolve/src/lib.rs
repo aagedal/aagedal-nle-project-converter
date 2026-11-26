@@ -32,6 +32,7 @@ mod tests {
                 parent_id: None,
                 media_paths: vec!["/Media/A001.mov".into()],
                 sequence_ids: vec!["seq-1".into()],
+                custom_metadata: BTreeMap::new(),
             }],
             media_assets: vec![MediaAsset {
                 id: "m1".into(),
@@ -47,6 +48,15 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                metadata: BTreeMap::from([
+                    ("Description".into(), "Studio interview A-cam".into()),
+                    ("Comments".into(), "Best take".into()),
+                    ("Scene".into(), "12A".into()),
+                ]),
+                custom_metadata: BTreeMap::from([
+                    ("External.Item.Id".into(), "11111111-2222-3333-4444-555555555555".into()),
+                    ("External.Artifact".into(), r#"{"type":"Segment","id":"abc"}"#.into()),
+                ]),
             }],
             sequences: vec![Sequence {
                 id: "seq-1".into(),
@@ -163,6 +173,7 @@ mod tests {
                 metadata: BTreeMap::new(),
             }],
             metadata: BTreeMap::new(),
+            custom_metadata_schema: BTreeMap::new(),
         };
 
         let out_path = std::env::temp_dir().join("aagedal_nle_roundtrip_test.drp");
@@ -189,6 +200,29 @@ mod tests {
         assert_eq!(reread.sequences[0].markers[0].name, "Check Grade");
         assert_eq!(reread.sequences[0].markers[0].color, "Purple");
         assert!(reread.sequences[0].audio_tracks[0].locked);
+        assert_eq!(reread.media_assets.len(), 1);
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Description").map(String::as_str),
+            Some("Studio interview A-cam")
+        );
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Scene").map(String::as_str),
+            Some("12A")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Item.Id")
+                .map(String::as_str),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Artifact")
+                .map(String::as_str),
+            Some(r#"{"type":"Segment","id":"abc"}"#)
+        );
 
         let _ = std::fs::remove_file(&out_path);
     }
@@ -394,6 +428,8 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
             }],
             sequences: vec![
                 Sequence {

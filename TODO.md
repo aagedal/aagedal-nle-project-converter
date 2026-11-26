@@ -47,8 +47,9 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Capture and model multi-point speed curves, alpha mode, data levels, and source audio channel mapping (`VirtualAudioTracksBA`).
 - [ ] **Stereo vs. mono Fairlight track configuration (`nle-resolve` writer)**
   - Preserve Premiere Pro stereo vs. mono track layouts (`AudioClipTrack` `ChannelType`) in Resolve's `FLStudioModelBA` and `VirtualAudioTrackBA` (Premiere `<Link>` clip linking is already translated via `FieldsBlob` `f1.f1.f1`).
-- [ ] **Optional unused Media Pool bin media preservation**
-  - Add a conversion option to include unplaced project bin media items in the target Resolve Media Pool (currently only timeline-referenced media is written).
+- [x] **Unused Media Pool bin media & clip/custom metadata preservation (`nle-core`, `nle-premiere`, `nle-resolve`)**
+  - Added `include_unused_media` option (default `true`) to preserve unplaced project bin media items across Premiere Pro and DaVinci Resolve Media Pools (skipping Premiere `<IsProxy>true</IsProxy>` duplicates).
+  - Added bidirectional standard clip metadata (`Description`, `Comments`, `Scene`, `Shot`, `Take`, `Keywords`, `Tape Name`, etc.) and custom/third-party project metadata (`Project.Metadata.Schema` / `ClipProjectItem` properties ↔ Resolve 21.2 `BtMetadataLockableBlob` `ThirdPartyMetadata`), scoped strictly to Premiere ↔ Resolve (omitted from FCPXML/OTIO/FCP7 exports).
 - [ ] **Native codec metadata on generated Resolve `MediaPoolItem`s**
   - Avoid inheriting placeholder `H.264/AAC` codec metadata strings from the scaffold template when source media is ProRes, HEVC, MXF, or MP3/WAV so Resolve displays accurate clip properties before relink/refresh.
 - [ ] **Connected video/audio lanes & transitions in FCPXML writer (`nle-interchange`)**

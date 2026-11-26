@@ -416,6 +416,7 @@ impl ConverterApp {
             project_name: Some(loaded.inspection.name.clone()),
             selected_sequence_ids: self.selected_seq_ids.iter().cloned().collect(),
             include_bins: self.include_bins,
+            include_unused_media: true,
             include_markers: self.include_markers,
             include_clip_colors: self.include_clip_colors,
             include_lumetri_grades: self.include_lumetri,

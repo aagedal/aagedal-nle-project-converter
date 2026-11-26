@@ -133,6 +133,10 @@ pub struct Project {
     pub media_assets: Vec<MediaAsset>,
     pub sequences: Vec<Sequence>,
     pub metadata: BTreeMap<String, String>,
+    /// Custom project metadata schema definitions (`property_name -> display_label`),
+    /// preserved across NLEs that support custom/third-party clip metadata (Premiere Pro ↔ Resolve).
+    #[serde(default)]
+    pub custom_metadata_schema: BTreeMap<String, String>,
 }
 
 impl Default for Project {
@@ -147,6 +151,7 @@ impl Default for Project {
             media_assets: Vec::new(),
             sequences: Vec::new(),
             metadata: BTreeMap::new(),
+            custom_metadata_schema: BTreeMap::new(),
         }
     }
 }
@@ -164,6 +169,9 @@ pub struct ProjectBin {
     pub parent_id: Option<String>,
     pub media_paths: Vec<String>,
     pub sequence_ids: Vec<String>,
+    /// Custom / third-party metadata attached to this bin (e.g. external asset manager folder IDs).
+    #[serde(default)]
+    pub custom_metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +189,14 @@ pub struct MediaAsset {
     pub audio_channels: u32,
     pub audio_sample_rate: u32,
     pub color_space: Option<String>,
+    /// Standard file/clip metadata (e.g. Description, Comments, Keywords, Scene, Shot, Take,
+    /// Angle, Camera #, Director, Location, Tape Name, etc.).
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    /// Custom / third-party plugin metadata (Premiere private project metadata ↔ Resolve
+    /// third-party clip metadata). Not exported to generic interchange formats.
+    #[serde(default)]
+    pub custom_metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

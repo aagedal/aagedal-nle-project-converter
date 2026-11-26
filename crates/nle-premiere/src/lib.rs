@@ -308,6 +308,7 @@ mod tests {
                     parent_id: None,
                     media_paths: vec!["/Media/ÖgonKrålærepø.mov".into()],
                     sequence_ids: vec![],
+                    custom_metadata: BTreeMap::from([("External.Folder.Id".into(), "folder-01".into())]),
                 },
                 ProjectBin {
                     id: "bin-seqs".into(),
@@ -315,6 +316,7 @@ mod tests {
                     parent_id: None,
                     media_paths: vec![],
                     sequence_ids: vec!["seq-main".into(), "seq-mc".into()],
+                    custom_metadata: BTreeMap::new(),
                 },
             ],
             media_assets: vec![MediaAsset {
@@ -331,6 +333,16 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                metadata: BTreeMap::from([
+                    ("Description".into(), "Field interview".into()),
+                    ("Comments".into(), "Keep audio".into()),
+                    ("Scene".into(), "4B".into()),
+                    ("Tape Name".into(), "CARD_A01".into()),
+                ]),
+                custom_metadata: BTreeMap::from([
+                    ("External.Item.Id".into(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+                    ("External.Artifact".into(), r#"{"type":"Segment","id":"seg-1"}"#.into()),
+                ]),
             }],
             sequences: vec![
                 Sequence {
@@ -554,6 +566,11 @@ mod tests {
                 },
             ],
             metadata: BTreeMap::new(),
+            custom_metadata_schema: BTreeMap::from([
+                ("External.Item.Id".into(), "External Item ID".into()),
+                ("External.Artifact".into(), "External Artifact".into()),
+                ("External.Folder.Id".into(), "External Folder ID".into()),
+            ]),
         };
 
         let out_path = std::env::temp_dir().join("aagedal_nle_prproj_writer_rt.prproj");
@@ -571,9 +588,44 @@ mod tests {
 
         let reread = read_prproj_file(&out_path).expect("reread generated .prproj");
         assert_eq!(reread.bins.len(), 2);
+        assert_eq!(
+            reread
+                .bins
+                .iter()
+                .find(|b| b.name == "01_Media")
+                .and_then(|b| b.custom_metadata.get("External.Folder.Id"))
+                .map(String::as_str),
+            Some("folder-01")
+        );
         assert_eq!(reread.sequences.len(), 2);
         assert_eq!(reread.media_assets.len(), 1);
         assert_eq!(reread.media_assets[0].path, "/Media/ÖgonKrålærepø.mov");
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Description").map(String::as_str),
+            Some("Field interview")
+        );
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Tape Name").map(String::as_str),
+            Some("CARD_A01")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Item.Id")
+                .map(String::as_str),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Artifact")
+                .map(String::as_str),
+            Some(r#"{"type":"Segment","id":"seg-1"}"#)
+        );
+        assert_eq!(
+            reread.custom_metadata_schema.get("External.Item.Id").map(String::as_str),
+            Some("External Item ID")
+        );
 
         let mc_seq = reread.sequences.iter().find(|s| s.name == "MC_3Cam").unwrap();
         assert_eq!(mc_seq.kind, SequenceKind::MulticamClip);

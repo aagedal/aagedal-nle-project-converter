@@ -82,6 +82,14 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     assert_eq!(resolve_project.source_format, NleFormat::DaVinciResolve);
     assert_eq!(resolve_project.sequences.len(), 1);
     assert_eq!(resolve_project.sequences[0].video_tracks[0].clips.len(), 2);
+    // Verify Premiere Warp Stabilizer activated Resolve Inspector Stabilization on clip 2
+    assert!(
+        resolve_project.sequences[0].video_tracks[0].clips[1]
+            .effects
+            .iter()
+            .any(|e| e.match_name == "resolve.inspector.stabilization"),
+        "expected activated Resolve Inspector Stabilization on clip 2"
+    );
     // Verify standard + custom/third-party metadata survived Premiere -> Resolve
     assert!(
         resolve_project.media_assets.iter().any(|a| {
@@ -134,6 +142,14 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     assert_eq!(reread_prproj.sequences.len(), 1);
     assert_eq!(reread_prproj.sequences[0].video_tracks[0].clips.len(), 2);
     assert!(!reread_prproj.sequences[0].markers.is_empty());
+    // Verify Resolve Inspector Stabilization round-tripped back to Premiere Warp Stabilizer on clip 2
+    assert!(
+        reread_prproj.sequences[0].video_tracks[0].clips[1]
+            .effects
+            .iter()
+            .any(|e| e.match_name == "AE.ADBE SubspaceStabilizer"),
+        "expected Warp Stabilizer attached on round-tripped Premiere clip 2"
+    );
     assert!(
         reread_prproj.media_assets.iter().any(|a| {
             a.metadata.get("Description").map(String::as_str) == Some("Studio interview A-cam")

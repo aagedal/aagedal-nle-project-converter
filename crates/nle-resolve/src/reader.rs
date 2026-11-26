@@ -3,14 +3,15 @@ use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
 };
+use crate::grade::has_resolve_stabilization;
 use crate::state::{
     decode_lockable_blob, decode_media_metadata_blob, resolve_color_to_premiere_label,
 };
 use crate::timemap::decode_media_timemap_detail;
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, Marker, MarkerScope, MediaAsset,
-    MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin,
-    ProjectReader, Rational, Sequence, SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance, Marker,
+    MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project,
+    ProjectBin, ProjectReader, Rational, Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -574,6 +575,33 @@ fn parse_resolve_tracks(
                     .cloned()
                     .unwrap_or_default();
 
+                let mut clip_effects = Vec::new();
+                if kind == TrackKind::Video {
+                    let has_stab = cnode
+                        .children()
+                        .find(|n| n.has_tag_name("pLmVerTable"))
+                        .map(|vt| {
+                            vt.descendants()
+                                .filter(|n| n.has_tag_name("Body"))
+                                .filter_map(|b| b.text())
+                                .any(has_resolve_stabilization)
+                        })
+                        .unwrap_or(false);
+                    if has_stab {
+                        clip_effects.push(EffectInstance {
+                            id: "resolve-stab".to_string(),
+                            match_name: "resolve.inspector.stabilization".to_string(),
+                            display_name: "Stabilization".to_string(),
+                            category: EffectCategory::Stabilization,
+                            media_kind: TrackKind::Video,
+                            enabled: true,
+                            is_intrinsic: false,
+                            is_animated: false,
+                            parameters: Vec::new(),
+                        });
+                    }
+                }
+
                 clips.push(Clip {
                     id: clip_db_id,
                     name: cname,
@@ -605,7 +633,7 @@ fn parse_resolve_tracks(
                     motion,
                     opacity,
                     lumetri_effects: Vec::new(),
-                    effects: Vec::new(),
+                    effects: clip_effects,
                     markers: clip_markers,
                 });
             }

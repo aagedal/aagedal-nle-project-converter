@@ -2401,11 +2401,24 @@ impl<'a> PrprojBuilder<'a> {
         if has_custom_opacity {
             comp_ids.push(self.emit_opacity_component(clip.opacity));
         }
+        let mut next_comp_id = 3u32;
         if self.options.include_lumetri_grades {
-            for (idx, lum) in clip.lumetri_effects.iter().enumerate() {
-                comp_ids.push(self.emit_lumetri_component(lum, (idx + 3) as u32));
+            for lum in &clip.lumetri_effects {
+                comp_ids.push(self.emit_lumetri_component(lum, next_comp_id));
+                next_comp_id += 1;
                 report.grades_attached += 1;
             }
+        }
+        let has_stabilization = clip.effects.iter().any(|e| {
+            e.enabled
+                && (e.category == nle_core::EffectCategory::Stabilization
+                    || e.match_name
+                        .to_ascii_lowercase()
+                        .contains("subspacestabilizer")
+                    || e.match_name.to_ascii_lowercase().contains("stabiliz"))
+        });
+        if has_stabilization {
+            comp_ids.push(self.emit_warp_stabilizer_component(next_comp_id));
         }
 
         let chain_id = self.alloc_id();
@@ -2555,6 +2568,22 @@ impl<'a> PrprojBuilder<'a> {
              \t\t<MatchName>AE.ADBE Lumetri</MatchName>\n\
              \t</VideoFilterComponent>",
             xml_escape(&lum.display_name)
+        ));
+        cid
+    }
+
+    fn emit_warp_stabilizer_component(&mut self, comp_id_num: u32) -> u64 {
+        let cid = self.alloc_id();
+        self.push(format!(
+            "\t<VideoFilterComponent ObjectID=\"{cid}\" ClassID=\"d10da199-beea-4dd1-b941-ed3a78766d50\" Version=\"9\">\n\
+             \t\t<Component Version=\"7\">\n\
+             \t\t\t<Params Version=\"1\" />\n\
+             \t\t\t<ID>{comp_id_num}</ID>\n\
+             \t\t\t<DisplayName>Warp Stabilizer</DisplayName>\n\
+             \t\t</Component>\n\
+             \t\t<VideoFilterType>2</VideoFilterType>\n\
+             \t\t<MatchName>AE.ADBE SubspaceStabilizer</MatchName>\n\
+             \t</VideoFilterComponent>"
         ));
         cid
     }

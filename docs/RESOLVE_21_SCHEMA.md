@@ -126,6 +126,15 @@ Stored inside `<Sm2Sequence><FieldsBlob>` under key `"FLStudioModelBA"` as Qt `q
 
 ---
 
+## 7. Inspector Stabilization (`pLmVerTable` / DRX `Body`)
+
+Resolve stores Inspector Stabilization inside the clip's `<pLmVerTable><ListMgt::LmVersion><Body>` (`0x80` raw / `0x81` zstd DRX protobuf) under top-level node **`f3`** (`f8 = 84`, corrector `f9.f1.f1 = 10`):
+- **Static settings (`f9.f1.f6.f2.f3`)**: `0x1030_0016` (`271581206`, mode/enabled varint `f2 = 8` for Perspective) and `0x1030_001D` (`271581213`, options varint `f4 = 0`).
+- **Analyzed per-frame track (`f9.f1.f6.f2.f4`)**: repeated `f1` entries per frame (`f1 = frame * 2`) with 80-byte tracker sample data (`0x1030_0015`) and two 3×3 `f32` homography matrices (`0x1030_0017`, `0x1030_001A`).
+- Implemented in `crates/nle-resolve/src/grade.rs` (`build_grade_and_stabilization_body` / `has_resolve_stabilization`): activates Resolve's Inspector Stabilizer when converting Premiere Warp Stabilizer (ready to click **Stabilize**) and detects Resolve Stabilization when converting back to Premiere (attaching `AE.ADBE SubspaceStabilizer`, ready to click **Analyze**).
+
+---
+
 ## 6. Regenerating the Reference Corpus
 
 With DaVinci Resolve Studio running (or installed at `/Applications/DaVinci Resolve`):

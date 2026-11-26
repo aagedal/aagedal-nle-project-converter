@@ -7,7 +7,7 @@ use crate::binary::{
     encode_utf16be, encode_utf16le, encode_wrapper_hex, hex_decode, hex_encode, replace_subslice,
     ProtoField, ProtoValue,
 };
-use crate::grade::{build_lumetri_grade_body, build_version_table_xml};
+use crate::grade::{build_grade_and_stabilization_body, build_version_table_xml};
 use crate::state::{
     append_lockable_blob, build_sequence_setup_blob, clip_color_lockable_blob_xml,
     configure_project_color_blob, media_metadata_lockable_blob_xml, patch_project_setup_defaults,
@@ -428,11 +428,29 @@ pub fn write_drp_file(
                 }
                 node = set_child_text(&node, "EffectFiltersBA", motion_hex.as_deref().unwrap_or(""));
 
-                // Lumetri Color -> native DRX grade attachment
-                if options.include_lumetri_grades && !clip.lumetri_effects.is_empty() {
-                    if let Some(body) = build_lumetri_grade_body(&clip.lumetri_effects, seq.width, seq.height) {
-                        let ver_table = build_version_table_xml(&body);
-                        node = replace_or_insert_block(&node, "pLmVerTable", &ver_table, "</Sm2TiVideoClip>");
+                // Lumetri Color -> native DRX grade attachment, and/or activated Inspector Stabilization
+                let lumetri_slice: &[nle_core::LumetriData] = if options.include_lumetri_grades {
+                    &clip.lumetri_effects
+                } else {
+                    &[]
+                };
+                let enable_stabilization = clip.effects.iter().any(|e| {
+                    e.enabled
+                        && (e.category == nle_core::EffectCategory::Stabilization
+                            || e.match_name
+                                .to_ascii_lowercase()
+                                .contains("subspacestabilizer")
+                            || e.match_name.to_ascii_lowercase().contains("stabiliz"))
+                });
+                if let Some(body) = build_grade_and_stabilization_body(
+                    lumetri_slice,
+                    enable_stabilization,
+                    seq.width,
+                    seq.height,
+                ) {
+                    let ver_table = build_version_table_xml(&body);
+                    node = replace_or_insert_block(&node, "pLmVerTable", &ver_table, "</Sm2TiVideoClip>");
+                    if !lumetri_slice.is_empty() {
                         total_grades += 1;
                     }
                 }

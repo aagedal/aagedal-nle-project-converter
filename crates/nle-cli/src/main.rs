@@ -74,9 +74,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 inspection.sequences.len()
             );
             for (idx, seq) in inspection.sequences.iter().enumerate() {
-                let trans_count: usize = project
-                    .sequences
-                    .get(idx)
+                let raw_seq = project.sequences.get(idx);
+                let kind_tag = match raw_seq.map(|s| s.kind) {
+                    Some(nle_core::SequenceKind::CompoundClip) => " [Compound]",
+                    Some(nle_core::SequenceKind::MulticamClip) => " [Multicam]",
+                    _ => "",
+                };
+                let trans_count: usize = raw_seq
                     .map(|s| {
                         s.video_tracks
                             .iter()
@@ -85,9 +89,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .sum()
                     })
                     .unwrap_or(0);
+                let retimed_count: usize = raw_seq
+                    .map(|s| {
+                        s.video_tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .filter(|c| (c.speed_percent - 100.0).abs() > 0.01 || c.reversed)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let nested_count: usize = raw_seq
+                    .map(|s| {
+                        s.video_tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .filter(|c| c.source_kind != nle_core::ClipSourceKind::Media)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let mut extras = String::new();
+                if retimed_count > 0 {
+                    extras.push_str(&format!(" | {retimed_count} retimed"));
+                }
+                if nested_count > 0 {
+                    extras.push_str(&format!(" | {nested_count} compound/multicam/nested"));
+                }
                 println!(
-                    "  • {} — {}x{} @ {} fps | {} | V:{} ({} clips) A:{} ({} clips) | {} transitions | {} effects",
+                    "  • {}{} — {}x{} @ {} fps | {} | V:{} ({} clips) A:{} ({} clips) | {} transitions | {} effects{}",
                     seq.name,
+                    kind_tag,
                     seq.width,
                     seq.height,
                     seq.fps_label,
@@ -97,7 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     seq.audio_track_count,
                     seq.audio_clip_count,
                     trans_count,
-                    seq.effect_count
+                    seq.effect_count,
+                    extras
                 );
             }
             if !plan.effects.is_empty() {

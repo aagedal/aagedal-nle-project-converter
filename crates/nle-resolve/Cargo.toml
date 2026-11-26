@@ -9,6 +9,7 @@ description = "Direct DaVinci Resolve (.drp) native ZIP/XML/protobuf writer and 
 nle-core.workspace = true
 zip.workspace = true
 flate2.workspace = true
+ruzstd.workspace = true
 roxmltree.workspace = true
 regex.workspace = true
 uuid.workspace = true

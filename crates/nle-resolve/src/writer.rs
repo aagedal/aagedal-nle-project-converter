@@ -12,8 +12,9 @@ use crate::state::{
 };
 use crate::timemap::{build_media_timemap, build_still_timemap, retimed_source_in, STILL_SOURCE_IN};
 use nle_core::{
-    Clip, ConversionMessage, ConversionOptions, ConversionReport, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence, Severity,
+    Clip, ClipSourceKind, ConversionMessage, ConversionOptions, ConversionReport, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
+    SequenceKind, Severity,
 };
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
@@ -49,7 +50,7 @@ pub fn write_drp_file(
     output_path: &Path,
     options: &ConversionOptions,
 ) -> NleResult<ConversionReport> {
-    let selected_sequences: Vec<&Sequence> = if options.selected_sequence_ids.is_empty() {
+    let mut selected_sequences: Vec<&Sequence> = if options.selected_sequence_ids.is_empty() {
         project.sequences.iter().collect()
     } else {
         project
@@ -63,6 +64,29 @@ pub fn write_drp_file(
         return Err(NleError::InvalidFormat(
             "No sequences selected to convert into DaVinci Resolve .drp".into(),
         ));
+    }
+
+    // Automatically include any nested, compound, or multicam sequences referenced by selected sequences
+    // so MediaRef links are never dangling.
+    let mut selected_ids: std::collections::HashSet<&str> =
+        selected_sequences.iter().map(|s| s.id.as_str()).collect();
+    let seq_by_id: HashMap<&str, &Sequence> =
+        project.sequences.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut scan_idx = 0usize;
+    while scan_idx < selected_sequences.len() {
+        let seq = selected_sequences[scan_idx];
+        scan_idx += 1;
+        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+            for clip in &track.clips {
+                if clip.source_kind != ClipSourceKind::Media && !clip.media_id.is_empty() {
+                    if let Some(&dep_seq) = seq_by_id.get(clip.media_id.as_str()) {
+                        if selected_ids.insert(dep_seq.id.as_str()) {
+                            selected_sequences.push(dep_seq);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut members = load_template_members()?;
@@ -150,6 +174,8 @@ pub fn write_drp_file(
         .ok_or_else(|| NleError::InvalidFormat("Template missing Sm2SequenceContainer DbId".into()))?;
     let orig_sequence_ref = extract_tag_inner(&orig_seq_xml, "Sequence")
         .ok_or_else(|| NleError::InvalidFormat("Template missing <Sequence> ref".into()))?;
+    let template_master_folder_id = extract_attr(&orig_pool_xml, "Sm2MpFolder", "DbId")
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Index project MediaAssets by id & normalized path
     let asset_by_id: HashMap<&str, &nle_core::MediaAsset> = project
@@ -163,13 +189,44 @@ pub fn write_drp_file(
     let mut media_pool_entries: Vec<(String, String)> = Vec::new(); // (path_key, <Element>...</Element>)
     let mut video_clip_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Pre-scan which media paths appear on video tracks
+    // Pre-scan which media paths appear on video tracks (skip sequence-backed nested/multicam clips)
     for seq in &selected_sequences {
         for track in &seq.video_tracks {
             for clip in &track.clips {
-                video_clip_paths.insert(path_key(&clip.media_path, &clip.name));
+                if clip.source_kind == ClipSourceKind::Media {
+                    video_clip_paths.insert(path_key(&clip.media_path, &clip.name));
+                }
             }
         }
+    }
+
+    // Pre-allocate Resolve DbIds for every sequence so nested/compound/multicam clips
+    // can reference the target Sm2MpTimelineClip / Sm2MpCompoundClip / Sm2MpMulticamClip DbId.
+    struct SeqResolveIds {
+        container_id: String,
+        seq_db_id: String,
+        timeline_id: String,
+        mp_clip_id: String,
+        unique_seq_id: String,
+        unique_mp_id: String,
+        duration_frames: i64,
+        fps: f64,
+    }
+    let mut seq_resolve_ids: HashMap<&str, SeqResolveIds> = HashMap::new();
+    for seq in &selected_sequences {
+        seq_resolve_ids.insert(
+            seq.id.as_str(),
+            SeqResolveIds {
+                container_id: Uuid::new_v4().to_string(),
+                seq_db_id: Uuid::new_v4().to_string(),
+                timeline_id: Uuid::new_v4().to_string(),
+                mp_clip_id: Uuid::new_v4().to_string(),
+                unique_seq_id: Uuid::new_v4().to_string(),
+                unique_mp_id: Uuid::new_v4().to_string(),
+                duration_frames: seq.computed_duration_frames().max(2),
+                fps: seq.frame_rate.as_f64(),
+            },
+        );
     }
 
     let mut timeline_clip_blocks: Vec<(String, String)> = Vec::new(); // (source_seq_id, <Element>...</Element>)
@@ -182,89 +239,168 @@ pub fn write_drp_file(
     let mut total_markers = 0usize;
     let mut total_grades = 0usize;
 
-    // Choose project default resolution/fps from the first non-empty sequence (avoiding empty template sequences)
+    // Choose project default resolution/fps from the first non-empty regular timeline
     let primary_seq = selected_sequences
         .iter()
         .copied()
-        .find(|s| s.total_clip_count() > 0)
+        .find(|s| s.kind == SequenceKind::Timeline && s.total_clip_count() > 0)
+        .or_else(|| selected_sequences.iter().copied().find(|s| s.total_clip_count() > 0))
         .unwrap_or(selected_sequences[0]);
     let default_w = primary_seq.width;
     let default_h = primary_seq.height;
     let default_fps_int = primary_seq.frame_rate.timebase().max(1) as u32;
 
     for seq in &selected_sequences {
-        let new_container_id = Uuid::new_v4().to_string();
-        let new_seq_db_id = Uuid::new_v4().to_string();
-        let new_timeline_id = Uuid::new_v4().to_string();
-        let new_timeline_clip_id = Uuid::new_v4().to_string();
-        let new_unique_seq_id = Uuid::new_v4().to_string();
-        let new_unique_mp_id = Uuid::new_v4().to_string();
+        let sids = &seq_resolve_ids[seq.id.as_str()];
+        let new_container_id = sids.container_id.clone();
+        let new_seq_db_id = sids.seq_db_id.clone();
+        let new_timeline_id = sids.timeline_id.clone();
+        let new_timeline_clip_id = sids.mp_clip_id.clone();
+        let new_unique_seq_id = sids.unique_seq_id.clone();
+        let new_unique_mp_id = sids.unique_mp_id.clone();
         let seq_fps = seq.frame_rate.as_f64();
         let tc_offset = seq.start_tc_frame.max(0);
 
+        // Pre-assign Resolve DbIds to every clip in this sequence so linked clips (Premiere <Link> groups)
+        // can reference each other's DbIds inside FieldsBlob f1.f1.f1.
+        let mut video_clip_db_ids: Vec<Vec<String>> = Vec::with_capacity(seq.video_tracks.len());
+        let mut audio_clip_db_ids: Vec<Vec<String>> = Vec::with_capacity(seq.audio_tracks.len());
+        let mut link_groups: HashMap<String, Vec<String>> = HashMap::new();
+        for track in &seq.video_tracks {
+            let mut ids = Vec::with_capacity(track.clips.len());
+            for clip in &track.clips {
+                let db_id = Uuid::new_v4().to_string();
+                if let Some(lg) = &clip.link_group_id {
+                    link_groups.entry(lg.clone()).or_default().push(db_id.clone());
+                }
+                ids.push(db_id);
+            }
+            video_clip_db_ids.push(ids);
+        }
+        for track in &seq.audio_tracks {
+            let mut ids = Vec::with_capacity(track.clips.len());
+            for clip in &track.clips {
+                let db_id = Uuid::new_v4().to_string();
+                if let Some(lg) = &clip.link_group_id {
+                    link_groups.entry(lg.clone()).or_default().push(db_id.clone());
+                }
+                ids.push(db_id);
+            }
+            audio_clip_db_ids.push(ids);
+        }
+
         // Build video tracks XML
         let mut video_tracks_xml = String::new();
-        for track in &seq.video_tracks {
+        for (t_idx, track) in seq.video_tracks.iter().enumerate() {
             let mut timed_items: Vec<(i64, u8, String)> = Vec::new();
-            for clip in &track.clips {
-                let pkey = path_key(&clip.media_path, &clip.name);
-                let media_ref_id = ensure_media_pool_item(
-                    &pkey,
-                    clip,
-                    asset_by_id.get(clip.media_id.as_str()).copied(),
-                    true,
-                    &mp_video_tpl,
-                    &mp_still_tpl,
-                    &mp_audio_tpl,
-                    &mut media_pool_ids,
-                    &mut media_pool_entries,
-                )?;
+            for (c_idx, clip) in track.clips.iter().enumerate() {
+                let container_target = if clip.source_kind != ClipSourceKind::Media {
+                    seq_resolve_ids.get(clip.media_id.as_str())
+                } else {
+                    None
+                };
 
-                let chosen_tpl = if clip.media_kind == MediaKind::Image {
+                let (media_ref_id, effective_media_path, src_fps, asset_dur) =
+                    if let Some(target) = container_target {
+                        (
+                            target.mp_clip_id.clone(),
+                            String::new(),
+                            target.fps,
+                            target
+                                .duration_frames
+                                .max(clip.source_out_frame)
+                                .max(clip.duration_frames())
+                                .max(2),
+                        )
+                    } else {
+                        let pkey = path_key(&clip.media_path, &clip.name);
+                        let mref = ensure_media_pool_item(
+                            &pkey,
+                            clip,
+                            asset_by_id.get(clip.media_id.as_str()).copied(),
+                            true,
+                            &mp_video_tpl,
+                            &mp_still_tpl,
+                            &mp_audio_tpl,
+                            &mut media_pool_ids,
+                            &mut media_pool_entries,
+                        )?;
+                        let dur = asset_by_id
+                            .get(clip.media_id.as_str())
+                            .map(|a| a.duration_frames)
+                            .unwrap_or(0)
+                            .max(clip.source_out_frame)
+                            .max(clip.duration_frames())
+                            .max(2);
+                        (mref, clip.media_path.clone(), clip.source_fps.as_f64(), dur)
+                    };
+
+                let chosen_tpl = if clip.media_kind == MediaKind::Image && container_target.is_none() {
                     &ti_still_tpl
                 } else {
                     &ti_video_tpl
                 };
-                let clip_db_id = Uuid::new_v4().to_string();
+                let clip_db_id = video_clip_db_ids[t_idx][c_idx].clone();
                 let mut node = replace_root_db_id(chosen_tpl, &clip_db_id);
                 let abs_start = tc_offset + clip.start_frame.max(0);
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
                 node = set_child_text(&node, "Start", &abs_start.to_string());
                 node = set_child_text(&node, "Duration", &clip.duration_frames().max(1).to_string());
 
-                let src_fps = clip.source_fps.as_f64();
-                let source_in = if clip.media_kind == MediaKind::Image {
+                let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
+                    -clip.speed_percent
+                } else {
+                    clip.speed_percent
+                };
+                let source_in = if clip.media_kind == MediaKind::Image && container_target.is_none() {
                     STILL_SOURCE_IN.to_string()
                 } else {
-                    retimed_source_in(clip.source_in_frame, src_fps, seq_fps, clip.speed_percent)
+                    retimed_source_in(
+                        clip.source_in_frame,
+                        clip.source_out_frame,
+                        asset_dur,
+                        src_fps,
+                        seq_fps,
+                        signed_speed,
+                        clip.reversed,
+                    )
                 };
                 node = set_child_text(&node, "In", &source_in);
                 node = set_child_text(&node, "MediaRef", &media_ref_id);
-                node = set_child_text(&node, "MediaFilePath", &xml_escape(&clip.media_path));
+                node = set_child_text(&node, "MediaFilePath", &xml_escape(&effective_media_path));
                 node = set_child_text(&node, "CurrentSelectorIdx", "0");
+                if container_target.is_some() {
+                    node = set_child_text(&node, "IsForceConformed", "true");
+                }
                 let mut fps_bytes = Vec::with_capacity(16);
                 fps_bytes.extend_from_slice(&src_fps.to_le_bytes());
                 fps_bytes.extend_from_slice(&[0u8; 8]);
                 node = set_child_text(&node, "MediaFrameRate", &hex_encode(&fps_bytes));
 
-                let asset_dur = asset_by_id
-                    .get(clip.media_id.as_str())
-                    .map(|a| a.duration_frames)
-                    .unwrap_or(0)
-                    .max(clip.source_out_frame)
-                    .max(clip.duration_frames())
-                    .max(2);
-
-                let timemap = if clip.media_kind == MediaKind::Image {
+                let timemap = if clip.media_kind == MediaKind::Image && container_target.is_none() {
                     build_still_timemap()
                 } else {
-                    build_media_timemap(asset_dur, src_fps, clip.speed_percent, false)
+                    build_media_timemap(asset_dur, src_fps, signed_speed, false)
                 };
                 node = set_child_text(&node, "MediaTimemapBA", &timemap);
 
-                // Motion static transform
-                let motion_hex = build_static_motion_payload(
+                // Clip FieldsBlob: linked sibling UUIDs (Premiere <Link>) + active multicam angle
+                let sibling_ids: Vec<String> = clip
+                    .link_group_id
+                    .as_deref()
+                    .and_then(|lg| link_groups.get(lg))
+                    .map(|g| g.iter().filter(|id| **id != clip_db_id).cloned().collect())
+                    .unwrap_or_default();
+                if let Some(fb_hex) =
+                    build_clip_fields_blob(&sibling_ids, clip.active_angle.as_deref())
+                {
+                    node = set_child_text(&node, "FieldsBlob", &fb_hex);
+                }
+
+                // Motion static transform + Opacity
+                let motion_hex = build_static_video_effects_payload(
                     &clip.motion,
+                    clip.opacity,
                     (clip.source_width, clip.source_height),
                     (seq.width, seq.height),
                 );
@@ -318,29 +454,58 @@ pub fn write_drp_file(
 
         // Build audio tracks XML
         let mut audio_tracks_xml = String::new();
-        for track in &seq.audio_tracks {
+        for (t_idx, track) in seq.audio_tracks.iter().enumerate() {
             let mut timed_items: Vec<(i64, u8, String)> = Vec::new();
-            for clip in &track.clips {
-                let pkey = path_key(&clip.media_path, &clip.name);
-                let is_video_backed = video_clip_paths.contains(&pkey);
-                let media_ref_id = ensure_media_pool_item(
-                    &pkey,
-                    clip,
-                    asset_by_id.get(clip.media_id.as_str()).copied(),
-                    is_video_backed,
-                    &mp_video_tpl,
-                    &mp_still_tpl,
-                    &mp_audio_tpl,
-                    &mut media_pool_ids,
-                    &mut media_pool_entries,
-                )?;
+            for (c_idx, clip) in track.clips.iter().enumerate() {
+                let container_target = if clip.source_kind != ClipSourceKind::Media {
+                    seq_resolve_ids.get(clip.media_id.as_str())
+                } else {
+                    None
+                };
+
+                let (media_ref_id, effective_media_path, is_video_backed, src_fps, asset_dur) =
+                    if let Some(target) = container_target {
+                        (
+                            target.mp_clip_id.clone(),
+                            String::new(),
+                            true,
+                            target.fps,
+                            target
+                                .duration_frames
+                                .max(clip.source_out_frame)
+                                .max(clip.duration_frames())
+                                .max(2),
+                        )
+                    } else {
+                        let pkey = path_key(&clip.media_path, &clip.name);
+                        let video_backed = video_clip_paths.contains(&pkey);
+                        let mref = ensure_media_pool_item(
+                            &pkey,
+                            clip,
+                            asset_by_id.get(clip.media_id.as_str()).copied(),
+                            video_backed,
+                            &mp_video_tpl,
+                            &mp_still_tpl,
+                            &mp_audio_tpl,
+                            &mut media_pool_ids,
+                            &mut media_pool_entries,
+                        )?;
+                        let dur = asset_by_id
+                            .get(clip.media_id.as_str())
+                            .map(|a| a.duration_frames)
+                            .unwrap_or(0)
+                            .max(clip.source_out_frame)
+                            .max(clip.duration_frames())
+                            .max(2);
+                        (mref, clip.media_path.clone(), video_backed, clip.source_fps.as_f64(), dur)
+                    };
 
                 let chosen_tpl = if is_video_backed {
                     &ti_audio_tpl
                 } else {
                     &ti_audio_wav_tpl
                 };
-                let clip_db_id = Uuid::new_v4().to_string();
+                let clip_db_id = audio_clip_db_ids[t_idx][c_idx].clone();
                 let mut node = replace_root_db_id(chosen_tpl, &clip_db_id);
                 let abs_start = tc_offset + clip.start_frame.max(0);
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
@@ -352,27 +517,46 @@ pub fn write_drp_file(
                     &mono_channel_mapping(clip.audio_channel.max(1)),
                 );
 
-                let src_fps = clip.source_fps.as_f64();
-                let source_in =
-                    retimed_source_in(clip.source_in_frame, src_fps, seq_fps, clip.speed_percent);
+                let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
+                    -clip.speed_percent
+                } else {
+                    clip.speed_percent
+                };
+                let source_in = retimed_source_in(
+                    clip.source_in_frame,
+                    clip.source_out_frame,
+                    asset_dur,
+                    src_fps,
+                    seq_fps,
+                    signed_speed,
+                    clip.reversed,
+                );
                 node = set_child_text(&node, "In", &source_in);
                 node = set_child_text(&node, "MediaRef", &media_ref_id);
-                node = set_child_text(&node, "MediaFilePath", &xml_escape(&clip.media_path));
+                node = set_child_text(&node, "MediaFilePath", &xml_escape(&effective_media_path));
+                if container_target.is_some() {
+                    node = set_child_text(&node, "IsForceConformed", "true");
+                }
                 let mut fps_bytes = Vec::with_capacity(16);
                 fps_bytes.extend_from_slice(&src_fps.to_le_bytes());
                 fps_bytes.extend_from_slice(&[0u8; 8]);
                 node = set_child_text(&node, "MediaFrameRate", &hex_encode(&fps_bytes));
 
-                let asset_dur = asset_by_id
-                    .get(clip.media_id.as_str())
-                    .map(|a| a.duration_frames)
-                    .unwrap_or(0)
-                    .max(clip.source_out_frame)
-                    .max(clip.duration_frames())
-                    .max(2);
-                let timemap = build_media_timemap(asset_dur, src_fps, clip.speed_percent, true);
+                let timemap = build_media_timemap(asset_dur, src_fps, signed_speed, true);
                 node = set_child_text(&node, "MediaTimemapBA", &timemap);
                 node = set_child_text(&node, "EffectFiltersBA", "");
+
+                let sibling_ids: Vec<String> = clip
+                    .link_group_id
+                    .as_deref()
+                    .and_then(|lg| link_groups.get(lg))
+                    .map(|g| g.iter().filter(|id| **id != clip_db_id).cloned().collect())
+                    .unwrap_or_default();
+                if let Some(fb_hex) =
+                    build_clip_fields_blob(&sibling_ids, clip.active_angle.as_deref())
+                {
+                    node = set_child_text(&node, "FieldsBlob", &fb_hex);
+                }
 
                 if options.include_clip_colors {
                     if let Some(preset) = clip.label_preset_index {
@@ -411,109 +595,196 @@ pub fn write_drp_file(
             seq_container_xml.into_bytes(),
         );
 
-        // Assemble Sm2MpTimelineClip for MediaPool
-        let mut tl_block = mp_timeline_template.clone();
-        tl_block = replace_attr_first(&tl_block, "Sm2MpTimelineClip", "DbId", &new_timeline_clip_id);
-        tl_block = set_child_text(&tl_block, "UniqueMediaPoolItemId", &new_unique_mp_id);
-        tl_block = replace_attr_first(&tl_block, "Sm2Timeline", "DbId", &new_timeline_id);
-        tl_block = set_child_text(&tl_block, "MpTimelineClip", &new_timeline_clip_id);
-        tl_block = replace_attr_first(&tl_block, "Sm2Sequence", "DbId", &new_seq_db_id);
-        tl_block = set_child_text(&tl_block, "UniqueSequenceId", &new_unique_seq_id);
-        tl_block = set_child_text(&tl_block, "Parent", &new_timeline_id);
+        // Assemble MediaPool container:
+        // - SequenceKind::CompoundClip -> <Sm2MpCompoundClip> (SequenceType=1)
+        // - SequenceKind::MulticamClip -> <Sm2MpMulticamClip> (SequenceType=2)
+        // - SequenceKind::Timeline     -> <Sm2MpTimelineClip> (added to TimelineHandles)
+        let tl_block = if matches!(seq.kind, SequenceKind::CompoundClip | SequenceKind::MulticamClip)
+        {
+            let tag = if seq.kind == SequenceKind::CompoundClip {
+                "Sm2MpCompoundClip"
+            } else {
+                "Sm2MpMulticamClip"
+            };
+            let seq_type_code: i32 = if seq.kind == SequenceKind::CompoundClip {
+                1
+            } else {
+                2
+            };
+            let escaped_seq_name = xml_escape(&seq.name);
+            let mut fr_hex_bytes = Vec::with_capacity(16);
+            fr_hex_bytes.extend_from_slice(&seq_fps.to_le_bytes());
+            fr_hex_bytes.extend_from_slice(&[0u8; 8]);
+            let fr_hex = hex_encode(&fr_hex_bytes);
 
-        // Update sequence names
-        let escaped_seq_name = xml_escape(&seq.name);
-        let re_tl_name = Regex::new(r"(?s)(<Sm2Timeline\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
-        tl_block = re_tl_name
-            .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
-            .into_owned();
-        let re_mp_name = Regex::new(r"(?s)(<Sm2MpTimelineClip\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
-        tl_block = re_mp_name
-            .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
-            .into_owned();
+            let mut res_bytes = Vec::with_capacity(16);
+            res_bytes.extend_from_slice(&(seq.width as u64).to_be_bytes());
+            res_bytes.extend_from_slice(&(seq.height as u64).to_be_bytes());
+            let res_hex = hex_encode(&res_bytes);
 
-        // Update UTF-16LE hex container UUID inside Sm2Sequence FieldsBlob / SequenceContainer ref
-        let old_hex = hex_encode(&encode_utf16le(&orig_container_id));
-        let new_hex = hex_encode(&encode_utf16le(&new_container_id));
-        tl_block = tl_block.replace(&old_hex, &new_hex);
+            let start_sec = tc_offset as f64 / seq_fps.max(1.0);
+            let dur_sec = seq.computed_duration_frames().max(0) as f64 / seq_fps.max(1.0);
+            let mut ext_bytes = Vec::with_capacity(16);
+            ext_bytes.extend_from_slice(&start_sec.to_le_bytes());
+            ext_bytes.extend_from_slice(&dur_sec.to_le_bytes());
+            let ext_hex = hex_encode(&ext_bytes);
 
-        // Update FrameRate, Resolution, MediaExtents, Marks
-        let mut fr_hex_bytes = Vec::with_capacity(16);
-        fr_hex_bytes.extend_from_slice(&seq_fps.to_le_bytes());
-        fr_hex_bytes.extend_from_slice(&[0u8; 8]);
-        tl_block = set_child_text(&tl_block, "FrameRate", &hex_encode(&fr_hex_bytes));
+            let seq_blob_entries = vec![
+                ("SequenceType".into(), 2u32, seq_type_code.to_be_bytes().to_vec()),
+                ("SeqRef".into(), 10u32, encode_utf16be(&new_container_id)),
+                ("IsRenderCacheBAVersioned".into(), 1u32, vec![1u8]),
+            ];
+            let seq_blob_hex = hex_encode(&encode_keyed_fields(&seq_blob_entries));
 
-        let mut res_bytes = Vec::with_capacity(16);
-        res_bytes.extend_from_slice(&(seq.width as u64).to_be_bytes());
-        res_bytes.extend_from_slice(&(seq.height as u64).to_be_bytes());
-        tl_block = set_child_text(&tl_block, "Resolution", &hex_encode(&res_bytes));
+            let vm_entries = vec![
+                ("UniqueId".into(), 10u32, encode_utf16be(&Uuid::new_v4().to_string())),
+                ("DbType".into(), 10u32, encode_utf16be("BtVideoMetadata")),
+            ];
+            let vm_hex = hex_encode(&encode_keyed_fields(&vm_entries));
+            let ptzr_id = Uuid::new_v4().to_string();
+            let num_audio_ch = (seq.audio_tracks.len().max(2) as u32).min(16);
 
-        let start_sec = tc_offset as f64 / seq_fps.max(1.0);
-        let dur_sec = seq.computed_duration_frames().max(0) as f64 / seq_fps.max(1.0);
-        let mut ext_bytes = Vec::with_capacity(16);
-        ext_bytes.extend_from_slice(&start_sec.to_le_bytes());
-        ext_bytes.extend_from_slice(&dur_sec.to_le_bytes());
-        tl_block = set_child_text(&tl_block, "MediaExtents", &hex_encode(&ext_bytes));
+            format!(
+                "<{tag} DbId=\"{new_timeline_clip_id}\">\
+                 <FieldsBlob/>\
+                 <Name>{escaped_seq_name}</Name>\
+                 <MpFolder>{template_master_folder_id}</MpFolder>\
+                 <UniqueMediaPoolItemId>{new_unique_mp_id}</UniqueMediaPoolItemId>\
+                 <MarkIn/><MarkInVideo/><MarkInAudio/><MarkOut/><MarkOutVideo/><MarkOutAudio/>\
+                 <CurPlayheadPosition/><PinsBA/><VirtualAudioTracksBA/><MatteVec/>\
+                 <AudioSource>AUDIO_SOURCE_EMBEDDED</AudioSource>\
+                 <PTZRPreset><SmPTZRPreset DbId=\"{ptzr_id}\"><FieldsBlob/><Name/><ID>100</ID><IsCustom>true</IsCustom><Producer>Producer@Resolve</Producer><Presets>7b7d</Presets></SmPTZRPreset></PTZRPreset>\
+                 <PTZRPresetType>0</PTZRPresetType>\
+                 <SlateTC>-68719476737</SlateTC>\
+                 <Sequence>\
+                  <Sm2Sequence DbId=\"{new_seq_db_id}\">\
+                   <FieldsBlob>{seq_blob_hex}</FieldsBlob>\
+                   <UniqueSequenceId>{new_unique_seq_id}</UniqueSequenceId>\
+                   <MediaExtents>{ext_hex}</MediaExtents>\
+                   <FrameRate>{fr_hex}</FrameRate>\
+                   <Resolution>{res_hex}</Resolution>\
+                   <VideoTrackVec/><AudioTrackVec/>\
+                   <Parent>{new_timeline_clip_id}</Parent>\
+                   <LastChangedTime>0</LastChangedTime>\
+                   <RenderCacheBA>00000024789c6366606420040000b20005</RenderCacheBA>\
+                   <AuxRenderCacheBA>00000024789c6366606420040000b20005</AuxRenderCacheBA>\
+                   <UIElementsState/>\
+                   <NumOutputAudioChannels>{num_audio_ch}</NumOutputAudioChannels>\
+                   <OutputAudioGain>0</OutputAudioGain>\
+                   <PinsBA/><ImportExportMetadataBA/><LockSysId/><DbSavedTime>0</DbSavedTime>\
+                  </Sm2Sequence>\
+                 </Sequence>\
+                 <VideoMetadata>{vm_hex}</VideoMetadata>\
+                 <MediaMetadata/>\
+                </{tag}>"
+            )
+        } else {
+            let mut tl_block = mp_timeline_template.clone();
+            tl_block = replace_attr_first(&tl_block, "Sm2MpTimelineClip", "DbId", &new_timeline_clip_id);
+            tl_block = set_child_text(&tl_block, "UniqueMediaPoolItemId", &new_unique_mp_id);
+            tl_block = replace_attr_first(&tl_block, "Sm2Timeline", "DbId", &new_timeline_id);
+            tl_block = set_child_text(&tl_block, "MpTimelineClip", &new_timeline_clip_id);
+            tl_block = replace_attr_first(&tl_block, "Sm2Sequence", "DbId", &new_seq_db_id);
+            tl_block = set_child_text(&tl_block, "UniqueSequenceId", &new_unique_seq_id);
+            tl_block = set_child_text(&tl_block, "Parent", &new_timeline_id);
 
-        let mark_in_str = seq.mark_in.map(|v| v.to_string()).unwrap_or_default();
-        let mark_out_str = seq
-            .mark_out
-            .map(|v| (v - 1).max(0).to_string())
-            .unwrap_or_default();
-        for kind in ["Audio", "Video"] {
-            tl_block = set_child_text(&tl_block, &format!("MarkIn{kind}"), &mark_in_str);
-            tl_block = set_child_text(&tl_block, &format!("MarkOut{kind}"), &mark_out_str);
-        }
+            // Update sequence names
+            let escaped_seq_name = xml_escape(&seq.name);
+            let re_tl_name = Regex::new(r"(?s)(<Sm2Timeline\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
+            tl_block = re_tl_name
+                .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
+                .into_owned();
+            let re_mp_name = Regex::new(r"(?s)(<Sm2MpTimelineClip\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
+            tl_block = re_mp_name
+                .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
+                .into_owned();
 
-        // Rebuild Fairlight audio model and inject custom SequenceSetup (when timeline res/fps differs from project default)
-        let seq_fps_int = seq.frame_rate.timebase().max(1) as u32;
-        let needs_custom_setup =
-            seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
-        if !seq.audio_tracks.is_empty() || needs_custom_setup {
-            let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
-            if let Some(caps) = re_seq_blob.captures(&tl_block) {
-                let mut blob_bytes = hex_decode(&caps[2])?;
-                if !seq.audio_tracks.is_empty() {
-                    let specs: Vec<FairlightTrackSpec> = seq
-                        .audio_tracks
-                        .iter()
-                        .map(|t| FairlightTrackSpec {
-                            is_mono: true,
-                            name: t.name.clone(),
-                            enabled: t.enabled,
-                            locked: t.locked,
-                        })
-                        .collect();
-                    match rebuild_fairlight_track_model(&blob_bytes, &specs) {
-                        Ok(rebuilt) => blob_bytes = rebuilt,
-                        Err(err) => {
-                            messages.push(ConversionMessage {
-                                severity: Severity::Warning,
-                                code: "FAIRLIGHT_MODEL".into(),
-                                sequence: Some(seq.name.clone()),
-                                clip: None,
-                                message: format!("Could not rebuild Fairlight strip model: {err}"),
-                            });
+            // Update UTF-16LE hex container UUID inside Sm2Sequence FieldsBlob / SequenceContainer ref
+            let old_hex = hex_encode(&encode_utf16le(&orig_container_id));
+            let new_hex = hex_encode(&encode_utf16le(&new_container_id));
+            tl_block = tl_block.replace(&old_hex, &new_hex);
+
+            // Update FrameRate, Resolution, MediaExtents, Marks
+            let mut fr_hex_bytes = Vec::with_capacity(16);
+            fr_hex_bytes.extend_from_slice(&seq_fps.to_le_bytes());
+            fr_hex_bytes.extend_from_slice(&[0u8; 8]);
+            tl_block = set_child_text(&tl_block, "FrameRate", &hex_encode(&fr_hex_bytes));
+
+            let mut res_bytes = Vec::with_capacity(16);
+            res_bytes.extend_from_slice(&(seq.width as u64).to_be_bytes());
+            res_bytes.extend_from_slice(&(seq.height as u64).to_be_bytes());
+            tl_block = set_child_text(&tl_block, "Resolution", &hex_encode(&res_bytes));
+
+            let start_sec = tc_offset as f64 / seq_fps.max(1.0);
+            let dur_sec = seq.computed_duration_frames().max(0) as f64 / seq_fps.max(1.0);
+            let mut ext_bytes = Vec::with_capacity(16);
+            ext_bytes.extend_from_slice(&start_sec.to_le_bytes());
+            ext_bytes.extend_from_slice(&dur_sec.to_le_bytes());
+            tl_block = set_child_text(&tl_block, "MediaExtents", &hex_encode(&ext_bytes));
+
+            let mark_in_str = seq.mark_in.map(|v| v.to_string()).unwrap_or_default();
+            let mark_out_str = seq
+                .mark_out
+                .map(|v| (v - 1).max(0).to_string())
+                .unwrap_or_default();
+            for kind in ["Audio", "Video"] {
+                tl_block = set_child_text(&tl_block, &format!("MarkIn{kind}"), &mark_in_str);
+                tl_block = set_child_text(&tl_block, &format!("MarkOut{kind}"), &mark_out_str);
+            }
+
+            // Rebuild Fairlight audio model and inject custom SequenceSetup (when timeline res/fps differs from project default)
+            let seq_fps_int = seq.frame_rate.timebase().max(1) as u32;
+            let needs_custom_setup =
+                seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
+            if !seq.audio_tracks.is_empty() || needs_custom_setup {
+                let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
+                if let Some(caps) = re_seq_blob.captures(&tl_block) {
+                    let mut blob_bytes = hex_decode(&caps[2])?;
+                    if !seq.audio_tracks.is_empty() {
+                        let specs: Vec<FairlightTrackSpec> = seq
+                            .audio_tracks
+                            .iter()
+                            .map(|t| FairlightTrackSpec {
+                                is_mono: true,
+                                name: t.name.clone(),
+                                enabled: t.enabled,
+                                locked: t.locked,
+                            })
+                            .collect();
+                        match rebuild_fairlight_track_model(&blob_bytes, &specs) {
+                            Ok(rebuilt) => blob_bytes = rebuilt,
+                            Err(err) => {
+                                messages.push(ConversionMessage {
+                                    severity: Severity::Warning,
+                                    code: "FAIRLIGHT_MODEL".into(),
+                                    sequence: Some(seq.name.clone()),
+                                    clip: None,
+                                    message: format!("Could not rebuild Fairlight strip model: {err}"),
+                                });
+                            }
                         }
                     }
-                }
-                if needs_custom_setup {
-                    if let Ok(mut kfields) = decode_keyed_fields(&blob_bytes) {
-                        kfields.retain(|(k, _, _)| k != "SequenceSetup");
-                        let setup_blob = build_sequence_setup_blob(seq.width, seq.height, seq_fps_int);
-                        let insert_pos = usize::from(!kfields.is_empty());
-                        kfields.insert(insert_pos, ("SequenceSetup".into(), 12, setup_blob));
-                        blob_bytes = encode_keyed_fields(&kfields);
+                    if needs_custom_setup {
+                        if let Ok(mut kfields) = decode_keyed_fields(&blob_bytes) {
+                            kfields.retain(|(k, _, _)| k != "SequenceSetup");
+                            let setup_blob = build_sequence_setup_blob(seq.width, seq.height, seq_fps_int);
+                            let insert_pos = usize::from(!kfields.is_empty());
+                            kfields.insert(insert_pos, ("SequenceSetup".into(), 12, setup_blob));
+                            blob_bytes = encode_keyed_fields(&kfields);
+                        }
                     }
+                    let m = caps.get(2).unwrap();
+                    let mut updated = String::with_capacity(tl_block.len());
+                    updated.push_str(&tl_block[..m.start()]);
+                    updated.push_str(&hex_encode(&blob_bytes));
+                    updated.push_str(&tl_block[m.end()..]);
+                    tl_block = updated;
                 }
-                let m = caps.get(2).unwrap();
-                let mut updated = String::with_capacity(tl_block.len());
-                updated.push_str(&tl_block[..m.start()]);
-                updated.push_str(&hex_encode(&blob_bytes));
-                updated.push_str(&tl_block[m.end()..]);
-                tl_block = updated;
             }
-        }
+
+            timeline_handles.push(new_timeline_id);
+            tl_block
+        };
 
         // Sequence markers
         if options.include_markers && !seq.markers.is_empty() {
@@ -521,7 +792,6 @@ pub fn write_drp_file(
             total_markers += seq.markers.len();
         }
 
-        timeline_handles.push(new_timeline_id);
         timeline_clip_blocks.push((
             seq.id.clone(),
             format!("   <Element>\n{tl_block}\n   </Element>"),
@@ -971,42 +1241,96 @@ fn patch_utf16_keyed_bytes(raw: &mut [u8], key: &str, value_type: u32, new_val: 
     }
 }
 
-fn build_static_motion_payload(
+/// Build Resolve 21.2 clip `<FieldsBlob>` encoding linked sibling DbIds (`f1.f1.f1`)
+/// and/or active multicam angle name (`f1.f3`, `f1.f4 = 1`).
+fn build_clip_fields_blob(sibling_ids: &[String], active_angle: Option<&str>) -> Option<String> {
+    let angle = active_angle.map(str::trim).filter(|s| !s.is_empty());
+    if sibling_ids.is_empty() && angle.is_none() {
+        return None;
+    }
+    let mut f1_fields: Vec<ProtoField> = Vec::new();
+    if !sibling_ids.is_empty() {
+        let entries: Vec<(String, u32, Vec<u8>)> = sibling_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (idx.to_string(), 10u32, encode_utf16be(id)))
+            .collect();
+        let dict_bytes = encode_keyed_fields(&entries);
+        let f11 = encode_protobuf(&[ProtoField::bytes(1, dict_bytes)]);
+        f1_fields.push(ProtoField::bytes(1, f11));
+    }
+    if let Some(a) = angle {
+        f1_fields.push(ProtoField::bytes(3, a.as_bytes().to_vec()));
+        f1_fields.push(ProtoField::varint(4, 1));
+    }
+    let outer = encode_protobuf(&[ProtoField::bytes(1, encode_protobuf(&f1_fields))]);
+    Some(encode_wrapper_hex(&outer))
+}
+
+fn build_static_video_effects_payload(
     motion: &MotionTransform,
+    opacity: f64,
     source_geom: (u32, u32),
     timeline_geom: (u32, u32),
 ) -> Option<String> {
-    if motion.is_identity() {
+    let has_motion = !motion.is_identity();
+    let has_opacity = opacity.is_finite() && (opacity - 100.0).abs() > 1e-3;
+    if !has_motion && !has_opacity {
         return None;
     }
-    let (sw, sh) = source_geom;
-    let (tw, th) = timeline_geom;
-    let fit = if sw > 0 && sh > 0 && tw > 0 && th > 0 {
-        (tw as f64 / sw as f64).min(th as f64 / sh as f64)
-    } else {
-        1.0
-    };
-    let zoom = (motion.scale / 100.0) / fit.max(1e-6);
 
-    let mut params: HashMap<usize, (u64, f64)> = HashMap::new();
-    params.insert(0, (42, zoom));
-    params.insert(1, (43, zoom));
-    params.insert(2, (40, motion.position_x));
-    params.insert(3, (41, motion.position_y));
-    params.insert(5, (47, -motion.rotation));
+    let mut outer_fields: Vec<ProtoField> = Vec::new();
 
-    let mut fields = vec![ProtoField::varint(1, 4), ProtoField::varint(7, 20)];
-    for slot in 0..12 {
-        if let Some(&(pid, val)) = params.get(&slot) {
-            let kf = encode_protobuf(&[ProtoField::f64_le(2, val)]);
-            let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
-            let param = encode_protobuf(&[ProtoField::varint(1, pid), ProtoField::bytes(3, curve)]);
-            fields.push(ProtoField::bytes(9, param));
+    if has_motion {
+        let (sw, sh) = source_geom;
+        let (tw, th) = timeline_geom;
+        let fit = if sw > 0 && sh > 0 && tw > 0 && th > 0 {
+            (tw as f64 / sw as f64).min(th as f64 / sh as f64)
         } else {
-            fields.push(ProtoField::bytes(9, Vec::new()));
+            1.0
+        };
+        let zoom = (motion.scale / 100.0) / fit.max(1e-6);
+        let zoom_y = motion
+            .scale_y
+            .map(|sy| (sy / 100.0) / fit.max(1e-6))
+            .unwrap_or(zoom);
+
+        let mut params: HashMap<usize, (u64, f64)> = HashMap::new();
+        params.insert(0, (42, zoom));
+        params.insert(1, (43, zoom_y));
+        params.insert(2, (40, motion.position_x));
+        params.insert(3, (41, motion.position_y));
+        params.insert(5, (47, -motion.rotation));
+
+        let mut fields = vec![ProtoField::varint(1, 4), ProtoField::varint(7, 20)];
+        for slot in 0..12 {
+            if let Some(&(pid, val)) = params.get(&slot) {
+                let kf = encode_protobuf(&[ProtoField::f64_le(2, val)]);
+                let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+                let param =
+                    encode_protobuf(&[ProtoField::varint(1, pid), ProtoField::bytes(3, curve)]);
+                fields.push(ProtoField::bytes(9, param));
+            } else {
+                fields.push(ProtoField::bytes(9, Vec::new()));
+            }
         }
+        outer_fields.push(ProtoField::bytes(1, encode_protobuf(&fields)));
     }
-    let outer = encode_protobuf(&[ProtoField::bytes(1, encode_protobuf(&fields))]);
+
+    if has_opacity {
+        // Resolve Filter 2 (Composite): slot 0 = CompositeMode (empty/default), slot 1 = param 1 Opacity (f64le)
+        let kf = encode_protobuf(&[ProtoField::f64_le(2, opacity.clamp(0.0, 100.0))]);
+        let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+        let param = encode_protobuf(&[ProtoField::varint(1, 1), ProtoField::bytes(3, curve)]);
+        let comp_fields = vec![
+            ProtoField::varint(1, 2),
+            ProtoField::bytes(9, Vec::new()),
+            ProtoField::bytes(9, param),
+        ];
+        outer_fields.push(ProtoField::bytes(1, encode_protobuf(&comp_fields)));
+    }
+
+    let outer = encode_protobuf(&outer_fields);
     Some(encode_wrapper_hex(&outer))
 }
 

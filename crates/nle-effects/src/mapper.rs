@@ -579,6 +579,7 @@ mod tests {
         project.sequences.push(Sequence {
             id: "seq-1".into(),
             name: "Main Edit".into(),
+            kind: SequenceKind::Timeline,
             width: 1920,
             height: 1080,
             frame_rate: Rational::FPS_25,
@@ -600,6 +601,8 @@ mod tests {
                     media_id: "m1".into(),
                     media_path: "/media/A001.mov".into(),
                     media_kind: MediaKind::Video,
+                    source_kind: ClipSourceKind::Media,
+                    active_angle: None,
                     start_frame: 0,
                     end_frame: 100,
                     source_in_frame: 0,

@@ -375,6 +375,34 @@ impl MotionTransform {
     }
 }
 
+/// Single three-way color wheel value in Premiere Lumetri HSL polar coordinates.
+/// Neutral is `hue_deg = 0.0`, `luma = 0.5`, `saturation = 0.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ColorWheel {
+    /// Hue angle in degrees `[0.0, 360.0)` (`0° = Red, 120° = Green, 240° = Blue`).
+    pub hue_deg: f64,
+    /// Luminance slider `[0.0, 1.0]`, neutral `0.5`.
+    pub luma: f64,
+    /// Chroma radius / saturation `[0.0, 1.0]`, neutral `0.0`.
+    pub saturation: f64,
+}
+
+impl Default for ColorWheel {
+    fn default() -> Self {
+        Self {
+            hue_deg: 0.0,
+            luma: 0.5,
+            saturation: 0.0,
+        }
+    }
+}
+
+impl ColorWheel {
+    pub fn is_neutral(&self) -> bool {
+        (self.luma - 0.5).abs() < 1e-6 && self.saturation.abs() < 1e-6
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LumetriData {
     pub order: usize,
@@ -388,8 +416,48 @@ pub struct LumetriData {
     pub shadows: Option<f64>,
     pub whites: Option<f64>,
     pub blacks: Option<f64>,
+    /// Creative Vibrance (`-100..100`) ↔ Resolve Primary Color Boost (`-100..100`).
+    #[serde(default)]
+    pub vibrance: Option<f64>,
+    /// Creative Sharpen (`-100..100`) ↔ Resolve Primary Mid/Detail (`-100..100`).
+    #[serde(default)]
+    pub sharpen: Option<f64>,
+    /// Color Wheels & Match Shadows wheel ↔ Resolve Primary Lift wheel.
+    #[serde(default)]
+    pub shadows_wheel: Option<ColorWheel>,
+    /// Color Wheels & Match Midtones wheel ↔ Resolve Primary Gamma wheel.
+    #[serde(default)]
+    pub midtones_wheel: Option<ColorWheel>,
+    /// Color Wheels & Match Highlights wheel ↔ Resolve Primary Gain wheel.
+    #[serde(default)]
+    pub highlights_wheel: Option<ColorWheel>,
+    /// Optional Resolve Primary Offset RGB `[dR, dG, dB]` in DRX space (`(ui - 25.0) / 25.0`).
+    #[serde(default)]
+    pub offset_rgb: Option<[f64; 3]>,
     pub is_animated: bool,
     pub unmapped_controls: Vec<String>,
+}
+
+impl LumetriData {
+    pub fn has_primary_adjustments(&self) -> bool {
+        self.exposure.is_some_and(|v| v.abs() > 1e-6)
+            || self.contrast.is_some_and(|v| v.abs() > 1e-6)
+            || self.saturation.is_some_and(|v| (v - 100.0).abs() > 1e-6)
+            || self.temperature.is_some_and(|v| v.abs() > 1e-6)
+            || self.tint.is_some_and(|v| v.abs() > 1e-6)
+            || self.highlights.is_some_and(|v| v.abs() > 1e-6)
+            || self.shadows.is_some_and(|v| v.abs() > 1e-6)
+            || self.whites.is_some_and(|v| v.abs() > 1e-6)
+            || self.blacks.is_some_and(|v| v.abs() > 1e-6)
+            || self.vibrance.is_some_and(|v| v.abs() > 1e-6)
+            || self.sharpen.is_some_and(|v| v.abs() > 1e-6)
+            || self.shadows_wheel.is_some_and(|w| !w.is_neutral())
+            || self.midtones_wheel.is_some_and(|w| !w.is_neutral())
+            || self.highlights_wheel.is_some_and(|w| !w.is_neutral())
+            || self
+                .offset_rgb
+                .is_some_and(|rgb| rgb.iter().any(|v| v.abs() > 1e-6))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

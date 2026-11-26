@@ -701,6 +701,8 @@ fn extract_media_asset(
         .and_then(extract_video_stream_fps)
         .unwrap_or(Rational::FPS_25);
 
+    let color_space = video_stream_node.and_then(extract_video_stream_color_space);
+
     let ext = Path::new(&name)
         .extension()
         .and_then(|s| s.to_str())
@@ -729,10 +731,18 @@ fn extract_media_asset(
         source_tc_string: "00:00:00:00".to_string(),
         audio_channels: 2,
         audio_sample_rate: 48_000,
-        color_space: None,
+        color_space,
         metadata: BTreeMap::new(),
         custom_metadata: BTreeMap::new(),
     })
+}
+
+fn extract_video_stream_color_space(vs: Node<'_, '_>) -> Option<String> {
+    find_descendant(vs, "ColorSpaceOverride")
+        .or_else(|| find_descendant(vs, "OriginalColorSpace"))
+        .and_then(|n| n.text())
+        .filter(|s| !s.trim().is_empty())
+        .map(|raw| decode_color_profile_name(raw, false))
 }
 
 fn extract_video_stream_fps(vs: Node<'_, '_>) -> Option<Rational> {
@@ -1293,6 +1303,7 @@ fn parse_clip(
     let mut source_full_duration = 0i64;
     let mut source_tc_frame = 0i64;
     let mut sample_rate = 48_000u32;
+    let mut media_color_space: Option<String> = None;
     let mut speed_percent = 100.0f64;
     let mut reversed = false;
     let mut audio_channel = 1u32;
@@ -1392,6 +1403,7 @@ fn parse_clip(
                     media_kind = MediaKind::Audio;
                 }
 
+                let mut clip_color_space: Option<String> = None;
                 if let Some(vs) = media_node
                     .children()
                     .find(|n| n.has_tag_name("VideoStream"))
@@ -1404,6 +1416,10 @@ fn parse_clip(
                     if let Some(overridden_fps) = extract_video_stream_fps(vs) {
                         source_fps = overridden_fps;
                     }
+                    clip_color_space = extract_video_stream_color_space(vs);
+                }
+                if clip_color_space.is_some() {
+                    media_color_space = clip_color_space;
                 }
             }
 
@@ -1485,6 +1501,9 @@ fn parse_clip(
                 if existing.media_kind == MediaKind::Audio && media_kind == MediaKind::Video {
                     existing.media_kind = MediaKind::Video;
                 }
+                if existing.color_space.is_none() && media_color_space.is_some() {
+                    existing.color_space = media_color_space.clone();
+                }
             })
             .or_insert_with(|| MediaAsset {
                 id: resolved_media_id.clone(),
@@ -1503,7 +1522,7 @@ fn parse_clip(
                 source_tc_string: frames_to_timecode(source_tc_frame, source_fps),
                 audio_channels: 2,
                 audio_sample_rate: sample_rate,
-                color_space: None,
+                color_space: media_color_space.clone(),
                 metadata: BTreeMap::new(),
                 custom_metadata: BTreeMap::new(),
             });

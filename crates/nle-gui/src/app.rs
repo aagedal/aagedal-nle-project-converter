@@ -1173,7 +1173,7 @@ impl ConverterApp {
             .child(
                 Checkbox::new("opt-lumetri")
                     .checked(self.include_lumetri)
-                    .label("Translate Lumetri Color → Resolve DRX serial nodes")
+                    .label("Translate color grades (Lumetri Basic + Color Wheels ↔ Resolve Primaries)")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.include_lumetri = *checked;
                         cx.notify();

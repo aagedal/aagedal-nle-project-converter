@@ -2522,14 +2522,27 @@ impl<'a> PrprojBuilder<'a> {
 
     fn emit_lumetri_component(&mut self, lum: &LumetriData, comp_id_num: u32) -> u64 {
         let mut params = Vec::new();
-        if let Some(v) = lum.temperature {
-            params.push(self.emit_float_param("Temperature", 7, v, -100.0, 100.0, None, None));
+        // Premiere Lumetri has no standalone 4th Offset wheel; fold Resolve Primary Offset RGB
+        // gently into Temperature, Tint, and Exposure so global warm/cool/luma shifts survive.
+        let mut temp = lum.temperature.unwrap_or(0.0);
+        let mut tint = lum.tint.unwrap_or(0.0);
+        let mut exp = lum.exposure.unwrap_or(0.0);
+        if let Some([or, og, ob]) = lum.offset_rgb {
+            if [or, og, ob].iter().all(|v| v.is_finite()) {
+                let oy = 0.2126 * or + 0.7152 * og + 0.0722 * ob;
+                exp = (exp + oy * 1.2).clamp(-5.0, 5.0);
+                temp = (temp + (or - ob) * 120.0).clamp(-100.0, 100.0);
+                tint = (tint + ((or + ob) * 0.5 - og) * 120.0).clamp(-100.0, 100.0);
+            }
         }
-        if let Some(v) = lum.tint {
-            params.push(self.emit_float_param("Tint", 8, v, -100.0, 100.0, None, None));
+        if lum.temperature.is_some() || temp.abs() > 1e-6 {
+            params.push(self.emit_float_param("Temperature", 7, temp, -100.0, 100.0, None, None));
         }
-        if let Some(v) = lum.exposure {
-            params.push(self.emit_float_param("Exposure", 11, v, -5.0, 5.0, None, None));
+        if lum.tint.is_some() || tint.abs() > 1e-6 {
+            params.push(self.emit_float_param("Tint", 8, tint, -100.0, 100.0, None, None));
+        }
+        if lum.exposure.is_some() || exp.abs() > 1e-6 {
+            params.push(self.emit_float_param("Exposure", 11, exp, -5.0, 5.0, None, None));
         }
         if let Some(v) = lum.contrast {
             params.push(self.emit_float_param("Contrast", 12, v, -100.0, 100.0, None, None));
@@ -2548,6 +2561,24 @@ impl<'a> PrprojBuilder<'a> {
         }
         if let Some(v) = lum.saturation {
             params.push(self.emit_float_param("Saturation", 20, v, 0.0, 200.0, None, None));
+        }
+        if let Some(v) = lum.sharpen {
+            params.push(self.emit_float_param("Sharpen", 29, v, -100.0, 100.0, None, None));
+        }
+        if let Some(v) = lum.vibrance {
+            params.push(self.emit_float_param("Vibrance", 30, v, -100.0, 100.0, None, None));
+        }
+        let has_wheels = lum.shadows_wheel.is_some_and(|w| !w.is_neutral())
+            || lum.midtones_wheel.is_some_and(|w| !w.is_neutral())
+            || lum.highlights_wheel.is_some_and(|w| !w.is_neutral());
+        if has_wheels {
+            params.push(self.emit_bool_param(" ", 46, true));
+            let wheels_b64 = crate::lumetri::encode_color_wheels_param47(
+                lum.shadows_wheel,
+                lum.midtones_wheel,
+                lum.highlights_wheel,
+            );
+            params.push(self.emit_arb_param(" ", 47, 9, &wheels_b64));
         }
 
         let mut params_xml = String::new();
@@ -2586,6 +2617,21 @@ impl<'a> PrprojBuilder<'a> {
              \t</VideoFilterComponent>"
         ));
         cid
+    }
+
+    fn emit_arb_param(&mut self, name: &str, param_id: u32, control_type: u32, b64: &str) -> u64 {
+        let oid = self.alloc_id();
+        self.push(format!(
+            "\t<ArbVideoComponentParam ObjectID=\"{oid}\" ClassID=\"313e54d4-6903-49ad-b0bf-8262cdd10f4e\" Version=\"3\">\n\
+             \t\t<Name>{}</Name>\n\
+             \t\t<ParameterControlType>{control_type}</ParameterControlType>\n\
+             \t\t<ParameterID>{param_id}</ParameterID>\n\
+             \t\t<StartKeyframePosition>{START_KF_SENTINEL}</StartKeyframePosition>\n\
+             \t\t<StartKeyframeValue Encoding=\"base64\">{b64}</StartKeyframeValue>\n\
+             \t</ArbVideoComponentParam>",
+            xml_escape(name)
+        ));
+        oid
     }
 
     fn emit_point_param(&mut self, name: &str, param_id: u32, x: f64, y: f64) -> u64 {

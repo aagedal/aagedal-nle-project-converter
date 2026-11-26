@@ -74,15 +74,15 @@ pub fn builtin_effect_catalog() -> Vec<EffectRule> {
             source_display_name: "Lumetri Color".into(),
             category: EffectCategory::Color,
             fidelity: MappingFidelity::NativeAutomatic,
-            notes: "Basic Correction (Exposure, Contrast, Saturation) is encoded natively as a Resolve Color Page serial node (DRX). Curves/HSL/LUTs are flagged for review.".into(),
+            notes: "Basic Correction (Temp, Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Saturation), Creative Vibrance/Sharpen, and Color Wheels (Shadows/Midtones/Highlights → Lift/Gamma/Gain) are encoded natively as Resolve Color Page serial nodes (Primaries - Color Wheels). Curves/HSL/LUTs are flagged for review.".into(),
             targets: vec![
                 TargetEffectOption {
                     id: "resolve.color.serial_node".into(),
-                    display_name: "Color Page → Serial Node (Native DRX Grade)".into(),
+                    display_name: "Color Page → Serial Node (Primaries - Color Wheels)".into(),
                     target_nle: NleFormat::DaVinciResolve,
                     category: EffectCategory::Color,
                     studio_only: false,
-                    notes: "Exposure → Master Gain (2^stops), Contrast → 1 + slider/100, Saturation → slider/2.".into(),
+                    notes: "Maps Basic Correction + Shadows/Midtones/Highlights Color Wheels to Resolve Primaries (Lift, Gamma, Gain, Temp, Tint, Contrast, Highlights, Shadows, Sat, Color Boost, Mid/Detail).".into(),
                 },
                 TargetEffectOption {
                     id: "fcp.color_wheels".into(),

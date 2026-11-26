@@ -655,12 +655,14 @@ pub fn build_sequence_setup_blob(width: u32, height: u32, fps_int: u32) -> Vec<u
     buf
 }
 
-/// Patch Resolve 21 `SM_Config` `SetupBA` protobuf fields for default resolution and frame rate.
+/// Patch Resolve 21 `SM_Config` `SetupBA` protobuf fields for default resolution, frame rate,
+/// Input Scaling (Fit), and DaVinci YRGB Color Managed mode when using the default Rec.709 workflow.
 pub fn patch_project_setup_defaults(
     project_xml: &str,
     width: u32,
     height: u32,
     fps_int: u32,
+    color_config: &ColorConfig,
 ) -> NleResult<String> {
     let re = Regex::new(r"(?s)(<SM_Config\b.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
     let Some(caps) = re.captures(project_xml) else {
@@ -694,6 +696,44 @@ pub fn patch_project_setup_defaults(
     }
     if fps_int > 0 {
         updates.insert(15u32, (fps_int as u64) * 2);
+    }
+
+    // Enable DaVinci YRGB Color Managed (Automatic Color Management -> SDR Rec.709) by default
+    // unless ACEScct or explicit HLG output was requested, so HDR/Log clips (e.g. BT.2100 PQ)
+    // automatically tone-map into Rec.709 just like Premiere Pro's Auto Tone Map.
+    let working = color_config
+        .working_space
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace("rec. ", "rec.");
+    let output = color_config
+        .output_space
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .replace("rec. ", "rec.");
+    let is_special_preset =
+        working.contains("acescct") || working.contains("2100 hlg") || output.contains("2100 hlg");
+    if !is_special_preset {
+        // Verified DaVinci Resolve 21.2 YRGB Color Managed (Automatic, SDR Rec.709) SetupBA fields:
+        updates.insert(7, 10);
+        updates.insert(11, 2);
+        updates.insert(183, 160);
+        updates.insert(184, 0);
+        updates.insert(190, 68);
+        updates.insert(191, 1);
+        updates.insert(195, 1);
+        updates.insert(202, 8);
+        updates.insert(203, 8);
+        updates.insert(209, 1);
+        updates.insert(210, 2);
+        updates.insert(211, 400);
+        updates.insert(212, 8);
+        updates.insert(215, 8);
+        updates.insert(225, 14);
+        updates.insert(276, 26);
+        updates.insert(307, 2);
     }
 
     let patched_payload = patch_proto_varints(raw_payload, &updates)?;
@@ -734,7 +774,25 @@ fn patch_proto_varints(data: &[u8], updates: &BTreeMap<u32, u64>) -> NleResult<V
             1 => pos += 8,
             2 => {
                 let len = read_varint(data, &mut pos)? as usize;
+                let payload_start = pos;
                 pos += len;
+                if pos > data.len() {
+                    return Err(NleError::InvalidFormat("Truncated SetupBA field".into()));
+                }
+                // Patch Resolve Input Scaling (f235) from Center Crop (0x2B) to Scale Entire Image to Fit (0x6D)
+                // so ZoomX=1.0 matches our motion transform math (zoom = (scale / 100) / fit) and Resolve's default.
+                if number == 235
+                    && len >= 16
+                    && data[payload_start..payload_start + 16]
+                        == [0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0x2B]
+                {
+                    out.extend_from_slice(&data[start..payload_start + 15]);
+                    out.push(0x6D);
+                    out.extend_from_slice(&data[payload_start + 16..pos]);
+                    continue;
+                }
+                out.extend_from_slice(&data[start..pos]);
+                continue;
             }
             5 => pos += 4,
             _ => return Err(NleError::InvalidFormat("Invalid SetupBA wire type".into())),

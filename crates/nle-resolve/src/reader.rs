@@ -3,7 +3,7 @@ use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
 };
-use crate::grade::has_resolve_stabilization;
+use crate::grade::{has_resolve_stabilization, parse_resolve_grade_nodes};
 use crate::state::{
     decode_lockable_blob, decode_media_metadata_blob, resolve_color_to_premiere_label,
 };
@@ -545,7 +545,7 @@ fn parse_resolve_tracks(
                     .map(|h| decode_clip_fields_blob(&h, &clip_db_id))
                     .unwrap_or((None, None));
 
-                let (motion, opacity) = child_text(cnode, "EffectFiltersBA")
+                let (mut motion, opacity) = child_text(cnode, "EffectFiltersBA")
                     .map(|h| decode_effect_filters(&h))
                     .unwrap_or_else(|| (MotionTransform::default(), 100.0));
 
@@ -565,6 +565,26 @@ fn parse_resolve_tracks(
                     }
                 }
 
+                // Resolve's ZoomX/ZoomY are relative to the fitted frame ("Scale entire image to fit"),
+                // whereas our canonical MotionTransform.scale (and Premiere's Motion Scale) is relative
+                // to the clip's native source pixel dimensions. Convert fitted zoom -> native pixel scale.
+                if kind == TrackKind::Video
+                    && source_kind == ClipSourceKind::Media
+                    && clip_w > 0
+                    && clip_h > 0
+                    && width > 0
+                    && height > 0
+                    && (clip_w != width || clip_h != height)
+                {
+                    let fit = (width as f64 / clip_w as f64).min(height as f64 / clip_h as f64);
+                    if fit.is_finite() && fit > 1e-6 {
+                        motion.scale *= fit;
+                        if let Some(sy) = motion.scale_y.as_mut() {
+                            *sy *= fit;
+                        }
+                    }
+                }
+
                 let label_preset_index = clip_color_by_id
                     .get(&clip_db_id)
                     .and_then(|&c| resolve_color_to_premiere_label(c));
@@ -576,29 +596,59 @@ fn parse_resolve_tracks(
                     .unwrap_or_default();
 
                 let mut clip_effects = Vec::new();
+                let mut lumetri_effects = Vec::new();
                 if kind == TrackKind::Video {
-                    let has_stab = cnode
-                        .children()
-                        .find(|n| n.has_tag_name("pLmVerTable"))
-                        .map(|vt| {
-                            vt.descendants()
-                                .filter(|n| n.has_tag_name("Body"))
-                                .filter_map(|b| b.text())
-                                .any(has_resolve_stabilization)
-                        })
-                        .unwrap_or(false);
-                    if has_stab {
-                        clip_effects.push(EffectInstance {
-                            id: "resolve-stab".to_string(),
-                            match_name: "resolve.inspector.stabilization".to_string(),
-                            display_name: "Stabilization".to_string(),
-                            category: EffectCategory::Stabilization,
-                            media_kind: TrackKind::Video,
-                            enabled: true,
-                            is_intrinsic: false,
-                            is_animated: false,
-                            parameters: Vec::new(),
-                        });
+                    if let Some(vt) = cnode.children().find(|n| n.has_tag_name("pLmVerTable")) {
+                        let active_id = vt
+                            .descendants()
+                            .find(|n| n.has_tag_name("pActive"))
+                            .and_then(|n| n.text())
+                            .map(|s| s.trim().to_string());
+                        let versions: Vec<_> = vt
+                            .descendants()
+                            .filter(|n| n.tag_name().name().ends_with("LmVersion"))
+                            .collect();
+                        let active_body = active_id
+                            .as_deref()
+                            .and_then(|aid| {
+                                versions
+                                    .iter()
+                                    .find(|v| v.attribute("DbId") == Some(aid))
+                                    .and_then(|v| {
+                                        v.children()
+                                            .find(|c| c.has_tag_name("Body"))
+                                            .and_then(|b| b.text())
+                                    })
+                            })
+                            .or_else(|| {
+                                vt.descendants()
+                                    .filter(|n| n.has_tag_name("Body"))
+                                    .filter_map(|b| b.text())
+                                    .next()
+                            });
+
+                        if let Some(body) = active_body {
+                            lumetri_effects = parse_resolve_grade_nodes(body);
+                        }
+
+                        let has_stab = vt
+                            .descendants()
+                            .filter(|n| n.has_tag_name("Body"))
+                            .filter_map(|b| b.text())
+                            .any(has_resolve_stabilization);
+                        if has_stab {
+                            clip_effects.push(EffectInstance {
+                                id: "resolve-stab".to_string(),
+                                match_name: "resolve.inspector.stabilization".to_string(),
+                                display_name: "Stabilization".to_string(),
+                                category: EffectCategory::Stabilization,
+                                media_kind: TrackKind::Video,
+                                enabled: true,
+                                is_intrinsic: false,
+                                is_animated: false,
+                                parameters: Vec::new(),
+                            });
+                        }
                     }
                 }
 
@@ -632,7 +682,7 @@ fn parse_resolve_tracks(
                     label_preset_index,
                     motion,
                     opacity,
-                    lumetri_effects: Vec::new(),
+                    lumetri_effects,
                     effects: clip_effects,
                     markers: clip_markers,
                 });

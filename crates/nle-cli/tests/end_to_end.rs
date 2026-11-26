@@ -170,3 +170,98 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn fcpxml_bundle_to_resolve_and_premiere_pipeline() {
+    let dir = std::env::temp_dir().join("aagedal_nle_fcp_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    let fcpxmld = dir.join("SampleEdit.fcpxmld");
+    std::fs::create_dir_all(&fcpxmld).expect("create fcpxmld dir");
+
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.15">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="100/2500s" width="1920" height="1080" colorSpace="1-1-1 (Rec. 709)"/>
+    <asset id="r2" name="Interview_A" uid="UID-A" start="3600s" duration="500/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Media/Interview_A.mov"/>
+    </asset>
+    <asset id="r3" name="Broll_Overlay" uid="UID-B" start="0s" duration="250/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Media/Broll_Overlay.mov"/>
+    </asset>
+    <effect id="r4" name="Gaussian" uid="FxPlug:Gaussian"/>
+  </resources>
+  <library>
+    <event name="Shoot Day 1">
+      <project name="FinalCut_Edit">
+        <sequence format="r1" duration="200/25s" tcStart="3600s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <asset-clip ref="r2" offset="3600s" name="Interview_A" start="3601s" duration="200/25s">
+              <adjust-transform scale="1.1 1.1" rotation="-5"/>
+              <adjust-stabilization type="automatic"/>
+              <asset-clip ref="r3" lane="1" offset="3603s" name="Broll_Overlay" start="0s" duration="75/25s">
+                <adjust-blend amount="0.8"/>
+                <filter-video ref="r4" name="Gaussian"/>
+              </asset-clip>
+              <marker start="3602s" duration="1/25s" value="Key Quote" note="Great delivery"/>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    std::fs::write(fcpxmld.join("Info.fcpxml"), xml).expect("write Info.fcpxml");
+
+    // 1. Read .fcpxmld bundle
+    let fcp_proj = nle_interchange::read_fcpxml_file(&fcpxmld).expect("read .fcpxmld");
+    assert_eq!(fcp_proj.source_format, NleFormat::FinalCutPro);
+    assert_eq!(fcp_proj.sequences.len(), 1);
+    assert_eq!(fcp_proj.sequences[0].video_tracks.len(), 2);
+
+    // 2. Analyze effects for Resolve target
+    let mut for_resolve = fcp_proj.clone();
+    let plan_drp = analyze_project_effects(&for_resolve, &[], NleFormat::DaVinciResolve);
+    assert!(plan_drp.needs_user_review_count >= 2); // Stabilization + Gaussian Blur
+    assert!(plan_drp.native_auto_count >= 1); // Motion (Transform)
+    let fx_res = apply_effect_decisions(&mut for_resolve, &plan_drp, &UserEffectDecisions::default(), true);
+    assert!(fx_res.markers_injected >= 2);
+
+    // 3. Convert FCP -> Resolve .drp & re-read
+    let drp_path = dir.join("from_fcp.drp");
+    let drp_rep = nle_resolve::write_drp_file(&for_resolve, &drp_path, &ConversionOptions::default())
+        .expect("write .drp from FCP");
+    assert_eq!(drp_rep.sequences_converted, 1);
+    assert_eq!(drp_rep.video_clips_converted, 2);
+    assert_eq!(drp_rep.audio_clips_converted, 2);
+
+    let reread_drp = nle_resolve::read_drp_file(&drp_path).expect("re-read .drp");
+    assert_eq!(reread_drp.sequences[0].video_tracks.len(), 2);
+    assert!(reread_drp.sequences[0].video_tracks[0].clips[0]
+        .effects
+        .iter()
+        .any(|e| e.match_name == "resolve.inspector.stabilization"));
+
+    // 4. Convert FCP -> Premiere .prproj & re-read
+    let mut for_pr = fcp_proj.clone();
+    let plan_pr = analyze_project_effects(&for_pr, &[], NleFormat::PremierePro);
+    apply_effect_decisions(&mut for_pr, &plan_pr, &UserEffectDecisions::default(), true);
+    let pr_path = dir.join("from_fcp.prproj");
+    let pr_opts = ConversionOptions {
+        target_format: NleFormat::PremierePro,
+        ..Default::default()
+    };
+    let pr_rep = nle_premiere::write_prproj_file(&for_pr, &pr_path, &pr_opts)
+        .expect("write .prproj from FCP");
+    assert_eq!(pr_rep.sequences_converted, 1);
+    assert_eq!(pr_rep.video_clips_converted, 2);
+
+    let reread_pr = nle_premiere::read_prproj_file(&pr_path).expect("re-read .prproj");
+    assert_eq!(reread_pr.sequences[0].video_tracks.len(), 2);
+    assert!(reread_pr.sequences[0].video_tracks[0].clips[0]
+        .effects
+        .iter()
+        .any(|e| e.match_name == "AE.ADBE SubspaceStabilizer"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

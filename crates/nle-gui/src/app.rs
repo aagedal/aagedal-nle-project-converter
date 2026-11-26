@@ -320,9 +320,10 @@ impl ConverterApp {
         cx.spawn_in(window, async move |this, cx| {
             let picked = rfd::AsyncFileDialog::new()
                 .set_title("Open NLE Project File")
-                .add_filter("NLE Projects", &["prproj", "drp", "drt"])
+                .add_filter("NLE Projects", &["prproj", "drp", "drt", "fcpbundle", "fcpxml", "fcpxmld"])
                 .add_filter("Premiere Pro Project", &["prproj"])
                 .add_filter("DaVinci Resolve Project", &["drp", "drt"])
+                .add_filter("Final Cut Pro Library / XML", &["fcpbundle", "fcpxml", "fcpxmld"])
                 .pick_file()
                 .await;
 
@@ -733,7 +734,7 @@ impl ConverterApp {
                             .text_color(rgb(theme::MUTED))
                             .text_center()
                             .child(
-                                "Read native Adobe Premiere Pro (.prproj) and DaVinci Resolve (.drp) project graphs directly in Rust, review app-exclusive effects interactively, and export ready-to-open native projects. Drop a file here or open one below.",
+                                "Read native Adobe Premiere Pro (.prproj), DaVinci Resolve (.drp), and Final Cut Pro (.fcpbundle / .fcpxml / .fcpxmld) projects directly in Rust, review app-exclusive effects interactively, and export ready-to-open projects. Drop a file here or open one below.",
                             ),
                     )
                     .child(
@@ -746,7 +747,7 @@ impl ConverterApp {
                             .child(
                                 Button::new("hero-open")
                                     .primary()
-                                    .label("Choose .prproj or .drp File")
+                                    .label("Choose .prproj, .drp, or FCP File")
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.on_open_file(window, cx);
@@ -767,11 +768,11 @@ impl ConverterApp {
                             .flex_wrap()
                             .gap(px(8.))
                             .child(theme::pill(
-                                "Premiere .prproj → Resolve .drp (Native)",
+                                "Premiere .prproj ↔ Resolve .drp (Native)",
                                 PillTone::Purple,
                             ))
                             .child(theme::pill(
-                                "Resolve .drp → FCPXML / OTIO / XML",
+                                "Final Cut Pro .fcpbundle / .fcpxml ↔ Resolve / Premiere",
                                 PillTone::Cyan,
                             ))
                             .child(theme::pill(

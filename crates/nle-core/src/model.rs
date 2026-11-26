@@ -52,7 +52,7 @@ impl NleFormat {
         match ext.trim_start_matches('.').to_ascii_lowercase().as_str() {
             "prproj" => Some(Self::PremierePro),
             "drp" | "drt" => Some(Self::DaVinciResolve),
-            "fcpxml" | "fcpxmld" => Some(Self::FinalCutPro),
+            "fcpxml" | "fcpxmld" | "fcpbundle" => Some(Self::FinalCutPro),
             "kdenlive" => Some(Self::Kdenlive),
             "xml" => Some(Self::Fcp7Xml),
             "otio" => Some(Self::OpenTimelineIo),

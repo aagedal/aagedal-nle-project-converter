@@ -544,6 +544,202 @@ pub fn builtin_effect_catalog() -> Vec<EffectRule> {
                 },
             ],
         },
+        // ── Final Cut Pro Source Effects (FCP → Resolve / Premiere) ───
+        EffectRule {
+            id: "fcp_stabilization".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.stabilization".into(), "stabilization".into()],
+            source_display_name: "Stabilization (FCP)".into(),
+            category: EffectCategory::Stabilization,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Final Cut Pro stabilization analysis cannot transfer verbatim; target NLE must re-analyze clip.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.inspector.stabilization".into(),
+                    display_name: "Inspector → Stabilization (Perspective / Similarity)".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Stabilization,
+                    studio_only: false,
+                    notes: "Activates Resolve Inspector Stabilization (ready to click Stabilize) and adds a review marker.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.warp_stabilizer".into(),
+                    display_name: "Warp Stabilizer (AE.ADBE SubspaceStabilizer)".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Stabilization,
+                    studio_only: false,
+                    notes: "Attaches Warp Stabilizer onto the clip in Premiere (ready to click Analyze) and adds a review marker.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_compositing".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.compositing".into(), "blend mode".into()],
+            source_display_name: "Compositing / Blend Mode".into(),
+            category: EffectCategory::Transform,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Non-Normal FCP blend mode (e.g. Overlay, Multiply, Screen).".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.inspector.composite".into(),
+                    display_name: "Inspector → Composite (Composite Mode)".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Transform,
+                    studio_only: false,
+                    notes: "Set matching Composite Mode in Resolve Inspector.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.opacity_blend".into(),
+                    display_name: "Effect Controls → Opacity → Blend Mode".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Transform,
+                    studio_only: false,
+                    notes: "Set matching Blend Mode under Opacity in Premiere Pro.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_gaussian_blur".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.gaussian".into(), "gaussian".into(), "blur".into()],
+            source_display_name: "Gaussian Blur (FCP)".into(),
+            category: EffectCategory::Blur,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Maps FCP blur effect to Resolve FX / Premiere Blur.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.ofx.gaussian_blur".into(),
+                    display_name: "Resolve FX Blur → Gaussian Blur".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Blur,
+                    studio_only: false,
+                    notes: "Direct equivalent in DaVinci Resolve.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.gaussian_blur".into(),
+                    display_name: "Video Effects → Blur & Sharpen → Gaussian Blur".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Blur,
+                    studio_only: false,
+                    notes: "Direct equivalent in Adobe Premiere Pro.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_keyer".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.keyer".into(), "keyer".into(), "chroma key".into()],
+            source_display_name: "Keyer (FCP)".into(),
+            category: EffectCategory::Keying,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "FCP chroma keyer requires re-sampling in target NLE.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.ofx.3d_keyer".into(),
+                    display_name: "Resolve FX Key → 3D Keyer".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Keying,
+                    studio_only: false,
+                    notes: "Fastest Edit-page chroma keyer in Resolve.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.ultra_key".into(),
+                    display_name: "Video Effects → Keying → Ultra Key".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Keying,
+                    studio_only: false,
+                    notes: "Built-in Premiere Pro chroma keyer.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_color".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec![
+                "color board".into(),
+                "color wheels".into(),
+                "color curves".into(),
+                "hue/saturation".into(),
+                "custom lut".into(),
+            ],
+            source_display_name: "Color Adjustments (FCP)".into(),
+            category: EffectCategory::Color,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "FCP color corrections are flagged for review in target color pipeline.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.color.serial_node".into(),
+                    display_name: "Color Page → Serial Node (Primaries / Curves)".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Color,
+                    studio_only: false,
+                    notes: "Rebuild color grade on Resolve Color page.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.lumetri".into(),
+                    display_name: "Lumetri Color".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Color,
+                    studio_only: false,
+                    notes: "Rebuild color grade in Premiere Pro Lumetri Color.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_voice_isolation".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.voice_isolation".into(), "voice isolation".into()],
+            source_display_name: "Voice Isolation (FCP)".into(),
+            category: EffectCategory::Audio,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Neural dialogue isolation.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.fairlight.voice_isolation".into(),
+                    display_name: "Fairlight → Voice Isolation (AI)".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Audio,
+                    studio_only: true,
+                    notes: "DaVinci Resolve Studio neural voice isolation.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.enhance_speech".into(),
+                    display_name: "Essential Sound → Enhance Speech / DeNoise".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Audio,
+                    studio_only: false,
+                    notes: "Premiere Pro AI dialogue cleanup.".into(),
+                },
+            ],
+        },
+        EffectRule {
+            id: "fcp_flow".into(),
+            source_nle: NleFormat::FinalCutPro,
+            match_patterns: vec!["fcp.flow".into(), "flow".into()],
+            source_display_name: "Flow Transition (FCP)".into(),
+            category: EffectCategory::Transition,
+            fidelity: MappingFidelity::AskUserSuggested,
+            notes: "Optical-flow jump-cut smoothing transition.".into(),
+            targets: vec![
+                TargetEffectOption {
+                    id: "resolve.transition.smooth_cut".into(),
+                    display_name: "Video Transitions → Smooth Cut".into(),
+                    target_nle: NleFormat::DaVinciResolve,
+                    category: EffectCategory::Transition,
+                    studio_only: false,
+                    notes: "Direct DaVinci Resolve optical-flow equivalent.".into(),
+                },
+                TargetEffectOption {
+                    id: "premiere.morph_cut".into(),
+                    display_name: "Video Transitions → Dissolve → Morph Cut".into(),
+                    target_nle: NleFormat::PremierePro,
+                    category: EffectCategory::Transition,
+                    studio_only: false,
+                    notes: "Direct Premiere Pro optical-flow equivalent.".into(),
+                },
+            ],
+        },
     ]
 }
 
@@ -560,4 +756,25 @@ pub fn find_catalog_rule<'a>(
             .iter()
             .any(|pat| m_lower.contains(pat) || d_lower.contains(pat))
     })
+}
+
+/// Find the best matching catalog rule preferring rules authored for `source_nle`.
+pub fn find_catalog_rule_for_source<'a>(
+    catalog: &'a [EffectRule],
+    source_nle: NleFormat,
+    match_name: &str,
+    display_name: &str,
+) -> Option<&'a EffectRule> {
+    let m_lower = match_name.to_ascii_lowercase();
+    let d_lower = display_name.to_ascii_lowercase();
+    catalog
+        .iter()
+        .find(|rule| {
+            rule.source_nle == source_nle
+                && rule
+                    .match_patterns
+                    .iter()
+                    .any(|pat| m_lower.contains(pat) || d_lower.contains(pat))
+        })
+        .or_else(|| find_catalog_rule(catalog, match_name, display_name))
 }

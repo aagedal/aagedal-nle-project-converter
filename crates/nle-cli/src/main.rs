@@ -15,13 +15,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inspect a .prproj or .drp project and list sequences, media, and detected effects
+    /// Inspect a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle project and list sequences, media, and detected effects
     Inspect {
         input: PathBuf,
         #[arg(long, default_value = "drp")]
         target: String,
     },
-    /// Convert a .prproj or .drp directly to .prproj, .drp, .fcpxml, .otio, or .xml
+    /// Convert a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle directly to .prproj, .drp, .fcpxml, .otio, or .xml
     Convert {
         input: PathBuf,
         #[arg(short, long)]
@@ -48,7 +48,12 @@ fn load_project(path: &Path) -> Result<Project, Box<dyn std::error::Error>> {
     match ext.as_str() {
         "prproj" => Ok(nle_premiere::read_prproj_file(path)?),
         "drp" | "drt" => Ok(nle_resolve::read_drp_file(path)?),
-        _ => Err(format!("Unsupported input format '.{ext}'. Supported: .prproj, .drp").into()),
+        "fcpxml" | "fcpxmld" => Ok(nle_interchange::read_fcpxml_file(path)?),
+        "fcpbundle" => Ok(nle_interchange::read_fcpbundle_file(path)?),
+        _ => Err(format!(
+            "Unsupported input format '.{ext}'. Supported: .prproj, .drp, .drt, .fcpxml, .fcpxmld, .fcpbundle"
+        )
+        .into()),
     }
 }
 

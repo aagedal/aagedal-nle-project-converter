@@ -126,12 +126,37 @@ Stored inside `<Sm2Sequence><FieldsBlob>` under key `"FLStudioModelBA"` as Qt `q
 
 ---
 
-## 7. Inspector Stabilization (`pLmVerTable` / DRX `Body`)
+## 7. Color Page Primaries (`Corrector 1`) & Inspector Stabilization (`pLmVerTable` / DRX `Body`)
 
-Resolve stores Inspector Stabilization inside the clip's `<pLmVerTable><ListMgt::LmVersion><Body>` (`0x80` raw / `0x81` zstd DRX protobuf) under top-level node **`f3`** (`f8 = 84`, corrector `f9.f1.f1 = 10`):
+Resolve stores both Color Page serial node grades (`f1`) and Inspector Stabilization (`f3`) inside the clip's `<pLmVerTable><ListMgt::LmVersion><Body>` (`0x80` raw / `0x81` zstd DRX protobuf):
+
+### Primaries – Color Wheels (`f1.f7[*].f9.f1`, Corrector `1`)
+
+Each serial node `f7` carries Primary Corrector (`f1 = 1`) parameters under `f6.f2.f3` (`f1` = varint param ID, `f2.f1` = `f32le` value):
+
+| Parameter ID (hex) | Decimal | Resolve UI Control | Wire Encoding (DRX ↔ UI) |
+|---|---:|---|---|
+| `0x0600_0004` | `100663300` | Hue | `(ui - 50.0) / 50.0` (neutral `0.0`) |
+| `0x0600_0005` | `100663301` | Saturation | `ui / 50.0` (neutral `1.0`) |
+| `0x0600_0018..1B` | `100663320..323` | Lift `R, G, B, Y` | `ui * 2.0` (neutral `0.0`) |
+| `0x0600_001D..20` | `100663325..328` | Gain `R, G, B, Y` | `ui * 1.0` (neutral `1.0`) |
+| `0x0600_0022..25` | `100663330..333` | Gamma `R, G, B, Y` | `ui * 4.0` (neutral `0.0`) |
+| `0x0600_007D..7F` | `100663421..423` | Offset `R, G, B` | `(ui - 25.0) / 25.0` (neutral `0.0`) |
+| `0x8600_000B` | `2248146955` | Lum Mix | `ui / 100.0` (neutral `1.0`) |
+| `0x8600_00C1` | `2248147137` | Contrast | `ui * 1.0` (neutral `1.0`) |
+| `0x8600_0110` | `2248147216` | Highlights | `ui * 1.0` (neutral `0.0`) |
+| `0x8600_0111` | `2248147217` | Shadows | `ui * 1.0` (neutral `0.0`) |
+| `0x8600_0112` | `2248147218` | Color Boost | `ui * 1.0` (neutral `0.0`) |
+| `0x8600_0113` | `2248147219` | Mid/Detail | `ui * 1.0` (neutral `0.0`) |
+| `0x8600_0115` | `2248147221` | Temp | `ui * 1.0` (neutral `0.0`) |
+| `0x8600_0116` | `2248147222` | Tint | `ui * 1.0` (neutral `0.0`) |
+
+### Inspector Stabilization (`f3`, Corrector `10`)
+
+Stored under top-level node **`f3`** (`f8 = 84`, corrector `f9.f1.f1 = 10`):
 - **Static settings (`f9.f1.f6.f2.f3`)**: `0x1030_0016` (`271581206`, mode/enabled varint `f2 = 8` for Perspective) and `0x1030_001D` (`271581213`, options varint `f4 = 0`).
 - **Analyzed per-frame track (`f9.f1.f6.f2.f4`)**: repeated `f1` entries per frame (`f1 = frame * 2`) with 80-byte tracker sample data (`0x1030_0015`) and two 3×3 `f32` homography matrices (`0x1030_0017`, `0x1030_001A`).
-- Implemented in `crates/nle-resolve/src/grade.rs` (`build_grade_and_stabilization_body` / `has_resolve_stabilization`): activates Resolve's Inspector Stabilizer when converting Premiere Warp Stabilizer (ready to click **Stabilize**) and detects Resolve Stabilization when converting back to Premiere (attaching `AE.ADBE SubspaceStabilizer`, ready to click **Analyze**).
+- Implemented bidirectionally in `crates/nle-resolve/src/grade.rs` (`build_grade_and_stabilization_body`, `parse_resolve_grade_nodes`, `has_resolve_stabilization`).
 
 ---
 

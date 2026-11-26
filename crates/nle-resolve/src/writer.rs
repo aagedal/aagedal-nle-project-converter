@@ -1052,6 +1052,7 @@ pub fn write_drp_file(
         default_w,
         default_h,
         default_fps_int,
+        &project.color_config,
     )?;
 
     let out_name = options
@@ -1182,6 +1183,7 @@ fn ensure_media_pool_item(
         source_start,
         sample_rate,
         !is_video,
+        asset.and_then(|a| a.color_space.as_deref()),
     )?;
     node = rewritten;
 
@@ -1259,6 +1261,7 @@ fn ensure_media_pool_asset(
         source_start,
         sample_rate,
         !is_video,
+        asset.color_space.as_deref(),
     )?;
     node = rewritten;
 
@@ -1289,6 +1292,7 @@ fn rewrite_media_pool_av_blobs(
     source_start: i64,
     sample_rate: u32,
     is_standalone_audio: bool,
+    color_space: Option<&str>,
 ) -> NleResult<(String, Option<String>)> {
     let mut out = xml.to_string();
     let mut primary_info_id: Option<String> = None;
@@ -1318,6 +1322,19 @@ fn rewrite_media_pool_av_blobs(
                 primary_info_id = Some(new_info_id.clone());
             }
             block = replace_attr_first(&block, info_tag, "DbId", &new_info_id);
+
+            if info_tag == "BtVideoInfo" {
+                if let Some(cs) = color_space {
+                    let csl = cs.to_ascii_lowercase();
+                    if csl.contains("pq") || csl.contains("2084") {
+                        // Verified Resolve 21.2 10-bit BT.2100 PQ <Radiometry> protobuf
+                        // (f1=404, f2=2, f14=2, f15=122, f16=64, f17=50, f18=262456, f19=0, f27=0)
+                        const RADIOMETRY_BT2100_PQ: &str =
+                            "8008940310027002787a8001408801329001b88210980100d80100";
+                        block = set_child_text(&block, "Radiometry", RADIOMETRY_BT2100_PQ);
+                    }
+                }
+            }
 
             if let Some(clip_hex) = extract_tag_inner(&block, "Clip") {
                 if let Ok(raw) = decode_wrapper_hex(&clip_hex) {

@@ -82,6 +82,13 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
     assert_eq!(resolve_project.source_format, NleFormat::DaVinciResolve);
     assert_eq!(resolve_project.sequences.len(), 1);
     assert_eq!(resolve_project.sequences[0].video_tracks[0].clips.len(), 2);
+    // Verify Lumetri Basic Correction survived Premiere -> Resolve DRX -> Readback
+    let clip0_grades = &resolve_project.sequences[0].video_tracks[0].clips[0].lumetri_effects;
+    assert_eq!(clip0_grades.len(), 1, "expected 1 decoded Resolve primary grade node on clip 1");
+    assert!((clip0_grades[0].exposure.unwrap() - 0.45).abs() < 0.01);
+    assert!((clip0_grades[0].contrast.unwrap() - 18.0).abs() < 0.05);
+    assert!((clip0_grades[0].saturation.unwrap() - 112.0).abs() < 0.05);
+
     // Verify Premiere Warp Stabilizer activated Resolve Inspector Stabilization on clip 2
     assert!(
         resolve_project.sequences[0].video_tracks[0].clips[1]

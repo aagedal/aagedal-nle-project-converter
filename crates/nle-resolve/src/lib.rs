@@ -32,6 +32,7 @@ mod tests {
                 parent_id: None,
                 media_paths: vec!["/Media/A001.mov".into()],
                 sequence_ids: vec!["seq-1".into()],
+                custom_metadata: BTreeMap::new(),
             }],
             media_assets: vec![MediaAsset {
                 id: "m1".into(),
@@ -47,6 +48,15 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                metadata: BTreeMap::from([
+                    ("Description".into(), "Studio interview A-cam".into()),
+                    ("Comments".into(), "Best take".into()),
+                    ("Scene".into(), "12A".into()),
+                ]),
+                custom_metadata: BTreeMap::from([
+                    ("External.Item.Id".into(), "11111111-2222-3333-4444-555555555555".into()),
+                    ("External.Artifact".into(), r#"{"type":"Segment","id":"abc"}"#.into()),
+                ]),
             }],
             sequences: vec![Sequence {
                 id: "seq-1".into(),
@@ -67,6 +77,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
                     clips: vec![Clip {
                         id: "c1".into(),
                         name: "A001.mov".into(),
@@ -119,6 +131,8 @@ mod tests {
                     locked: true,
                     muted: false,
                     solo: false,
+                    audio_channels: 1,
+                    output_bus_id: Some("bus-1".into()),
                     clips: vec![Clip {
                         id: "a1".into(),
                         name: "A001.mov".into(),
@@ -152,6 +166,29 @@ mod tests {
                     transitions: vec![],
                     markers: vec![],
                 }],
+                audio_buses: vec![
+                    AudioBus {
+                        id: "bus-0".into(),
+                        name: "MAIN MIX".into(),
+                        channels: 2,
+                        is_main: true,
+                        parent_bus_id: None,
+                    },
+                    AudioBus {
+                        id: "bus-1".into(),
+                        name: "DIALOGUE".into(),
+                        channels: 2,
+                        is_main: false,
+                        parent_bus_id: Some("bus-0".into()),
+                    },
+                    AudioBus {
+                        id: "bus-2".into(),
+                        name: "MUSIC".into(),
+                        channels: 2,
+                        is_main: false,
+                        parent_bus_id: Some("bus-0".into()),
+                    },
+                ],
                 markers: vec![Marker {
                     frame: 50,
                     duration_frames: 25,
@@ -163,6 +200,7 @@ mod tests {
                 metadata: BTreeMap::new(),
             }],
             metadata: BTreeMap::new(),
+            custom_metadata_schema: BTreeMap::new(),
         };
 
         let out_path = std::env::temp_dir().join("aagedal_nle_roundtrip_test.drp");
@@ -184,7 +222,43 @@ mod tests {
         assert_eq!(reread.sequences[0].frame_rate, Rational::FPS_25);
         assert_eq!(reread.sequences[0].video_tracks[0].clips.len(), 1);
         assert_eq!(reread.sequences[0].video_tracks[0].clips[0].name, "A001.mov");
+        assert_eq!(reread.sequences[0].video_tracks[0].clips[0].label_preset_index, Some(8));
+        assert_eq!(reread.sequences[0].markers.len(), 1);
+        assert_eq!(reread.sequences[0].markers[0].name, "Check Grade");
+        assert_eq!(reread.sequences[0].markers[0].color, "Purple");
         assert!(reread.sequences[0].audio_tracks[0].locked);
+        assert_eq!(reread.sequences[0].audio_tracks[0].audio_channels, 1);
+        assert_eq!(reread.sequences[0].audio_buses.len(), 3);
+        assert_eq!(reread.sequences[0].audio_buses[0].name, "MAIN MIX");
+        assert_eq!(reread.sequences[0].audio_buses[1].name, "DIALOGUE");
+        assert_eq!(reread.sequences[0].audio_buses[2].name, "MUSIC");
+        assert_eq!(
+            reread.sequences[0].audio_tracks[0].output_bus_id.as_deref(),
+            Some("bus-1")
+        );
+        assert_eq!(reread.media_assets.len(), 1);
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Description").map(String::as_str),
+            Some("Studio interview A-cam")
+        );
+        assert_eq!(
+            reread.media_assets[0].metadata.get("Scene").map(String::as_str),
+            Some("12A")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Item.Id")
+                .map(String::as_str),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert_eq!(
+            reread.media_assets[0]
+                .custom_metadata
+                .get("External.Artifact")
+                .map(String::as_str),
+            Some(r#"{"type":"Segment","id":"abc"}"#)
+        );
 
         let _ = std::fs::remove_file(&out_path);
     }
@@ -213,6 +287,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
                     clips: vec![Clip {
                         id: "v1".into(),
                         name: "ShotA.mp4".into(),
@@ -260,6 +336,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 1,
+                    output_bus_id: None,
                     clips: vec![],
                     transitions: vec![Transition {
                         name: "Constant Power".into(),
@@ -270,6 +348,7 @@ mod tests {
                     }],
                     markers: vec![],
                 }],
+                audio_buses: vec![],
                 markers: vec![],
                 metadata: BTreeMap::new(),
             }],
@@ -390,6 +469,8 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
             }],
             sequences: vec![
                 Sequence {
@@ -411,6 +492,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![Clip {
                             id: "ang1".into(),
                             name: "CamA.mov".into(),
@@ -445,6 +528,7 @@ mod tests {
                         markers: vec![],
                     }],
                     audio_tracks: vec![],
+                    audio_buses: vec![],
                     markers: vec![],
                     metadata: BTreeMap::new(),
                 },
@@ -467,6 +551,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![
                             Clip {
                                 id: "v-mc".into(),
@@ -540,6 +626,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![Clip {
                             id: "a-mc".into(),
                             name: "MC_3Cam".into(),
@@ -573,6 +661,7 @@ mod tests {
                         transitions: vec![],
                         markers: vec![],
                     }],
+                    audio_buses: vec![],
                     markers: vec![],
                     metadata: BTreeMap::new(),
                 },

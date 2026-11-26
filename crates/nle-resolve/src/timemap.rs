@@ -121,16 +121,16 @@ pub fn build_media_timemap(
     hex_encode(&encode_keyed_fields(&entries))
 }
 
-/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed)`.
-/// Returns `Some((100.0, false))` for identity `0x02...` maps, negative speed + `reversed = true`
-/// for reverse playback, and `Some((0.0, false))` for freeze frames / still holds.
-pub fn decode_media_timemap(hex: &str) -> Option<(f64, bool)> {
+/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed, freeze_hold_sec)`.
+/// Returns `Some((100.0, false, None))` for identity `0x02...` maps, negative speed + `reversed = true`
+/// for reverse playback, and `Some((0.0, false, Some(hold_sec)))` for freeze frames / still holds.
+pub fn decode_media_timemap_detail(hex: &str) -> Option<(f64, bool, Option<f64>)> {
     let raw = hex_decode(hex).ok()?;
     if raw.is_empty() {
         return None;
     }
     if raw[0] == 0x02 {
-        return Some((100.0, false));
+        return Some((100.0, false, None));
     }
     let fields = decode_keyed_fields(&raw).ok()?;
     let kf_raw = fields
@@ -176,13 +176,19 @@ pub fn decode_media_timemap(hex: &str) -> Option<(f64, bool)> {
     }
     let dy = y1 - y0;
     if dy.abs() < 1e-9 {
-        return Some((0.0, false));
+        return Some((0.0, false, Some(y0.max(0.0))));
     }
     let speed = (dy / dx) * 100.0;
     if !speed.is_finite() {
         return None;
     }
-    Some((speed, speed < 0.0))
+    Some((speed, speed < 0.0, None))
+}
+
+/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed)`.
+pub fn decode_media_timemap(hex: &str) -> Option<(f64, bool)> {
+    let (spd, rev, _) = decode_media_timemap_detail(hex)?;
+    Some((spd, rev))
 }
 
 /// Encode source in-point as Resolve's record-domain frame position (integer or `whole|<f64_le_hex>`).

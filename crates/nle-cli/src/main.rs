@@ -21,7 +21,7 @@ enum Commands {
         #[arg(long, default_value = "drp")]
         target: String,
     },
-    /// Convert a .prproj or .drp directly to .drp, .fcpxml, .otio, or .xml
+    /// Convert a .prproj or .drp directly to .prproj, .drp, .fcpxml, .otio, or .xml
     Convert {
         input: PathBuf,
         #[arg(short, long)]
@@ -186,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut report = match target_fmt {
+                NleFormat::PremierePro => nle_premiere::write_prproj_file(&project, &output, &options)?,
                 NleFormat::DaVinciResolve => nle_resolve::write_drp_file(&project, &output, &options)?,
                 NleFormat::FinalCutPro => nle_interchange::write_fcpxml_file(&project, &output, &options)?,
                 NleFormat::OpenTimelineIo => nle_interchange::write_otio_file(&project, &output, &options)?,

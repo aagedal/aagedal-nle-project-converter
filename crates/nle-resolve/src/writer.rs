@@ -1,14 +1,17 @@
-use crate::audio::{mono_channel_mapping, rebuild_fairlight_track_model, FairlightTrackSpec};
+use crate::audio::{
+    mono_channel_mapping, rebuild_fairlight_track_model, stereo_channel_mapping, FairlightBusSpec,
+    FairlightTrackSpec,
+};
 use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_wrapper_hex, encode_keyed_fields, encode_protobuf,
     encode_utf16be, encode_utf16le, encode_wrapper_hex, hex_decode, hex_encode, replace_subslice,
     ProtoField, ProtoValue,
 };
-use crate::grade::{build_lumetri_grade_body, build_version_table_xml};
+use crate::grade::{build_grade_and_stabilization_body, build_version_table_xml};
 use crate::state::{
     append_lockable_blob, build_sequence_setup_blob, clip_color_lockable_blob_xml,
-    configure_project_color_blob, patch_project_setup_defaults, premiere_label_to_resolve_color,
-    sequence_lockable_blob_xml,
+    configure_project_color_blob, media_metadata_lockable_blob_xml, patch_project_setup_defaults,
+    premiere_label_to_resolve_color, sequence_lockable_blob_xml,
 };
 use crate::timemap::{build_media_timemap, build_still_timemap, retimed_source_in, STILL_SOURCE_IN};
 use nle_core::{
@@ -183,6 +186,12 @@ pub fn write_drp_file(
         .iter()
         .map(|a| (a.id.as_str(), a))
         .collect();
+    let asset_by_path: HashMap<String, &nle_core::MediaAsset> = project
+        .media_assets
+        .iter()
+        .filter(|a| !a.path.is_empty())
+        .map(|a| (path_key(&a.path, &a.name), a))
+        .collect();
 
     // Canonical deduplicated media pool entries: path_key -> (db_id, xml_block, is_video)
     let mut media_pool_ids: HashMap<String, String> = HashMap::new();
@@ -314,19 +323,23 @@ pub fn write_drp_file(
                         )
                     } else {
                         let pkey = path_key(&clip.media_path, &clip.name);
+                        let matched_asset = asset_by_id
+                            .get(clip.media_id.as_str())
+                            .copied()
+                            .or_else(|| asset_by_path.get(&pkey).copied());
                         let mref = ensure_media_pool_item(
                             &pkey,
                             clip,
-                            asset_by_id.get(clip.media_id.as_str()).copied(),
+                            matched_asset,
                             true,
                             &mp_video_tpl,
                             &mp_still_tpl,
                             &mp_audio_tpl,
                             &mut media_pool_ids,
                             &mut media_pool_entries,
+                            &mut lockable_blobs,
                         )?;
-                        let dur = asset_by_id
-                            .get(clip.media_id.as_str())
+                        let dur = matched_asset
                             .map(|a| a.duration_frames)
                             .unwrap_or(0)
                             .max(clip.source_out_frame)
@@ -415,11 +428,29 @@ pub fn write_drp_file(
                 }
                 node = set_child_text(&node, "EffectFiltersBA", motion_hex.as_deref().unwrap_or(""));
 
-                // Lumetri Color -> native DRX grade attachment
-                if options.include_lumetri_grades && !clip.lumetri_effects.is_empty() {
-                    if let Some(body) = build_lumetri_grade_body(&clip.lumetri_effects, seq.width, seq.height) {
-                        let ver_table = build_version_table_xml(&body);
-                        node = replace_or_insert_block(&node, "pLmVerTable", &ver_table, "</Sm2TiVideoClip>");
+                // Lumetri Color -> native DRX grade attachment, and/or activated Inspector Stabilization
+                let lumetri_slice: &[nle_core::LumetriData] = if options.include_lumetri_grades {
+                    &clip.lumetri_effects
+                } else {
+                    &[]
+                };
+                let enable_stabilization = clip.effects.iter().any(|e| {
+                    e.enabled
+                        && (e.category == nle_core::EffectCategory::Stabilization
+                            || e.match_name
+                                .to_ascii_lowercase()
+                                .contains("subspacestabilizer")
+                            || e.match_name.to_ascii_lowercase().contains("stabiliz"))
+                });
+                if let Some(body) = build_grade_and_stabilization_body(
+                    lumetri_slice,
+                    enable_stabilization,
+                    seq.width,
+                    seq.height,
+                ) {
+                    let ver_table = build_version_table_xml(&body);
+                    node = replace_or_insert_block(&node, "pLmVerTable", &ver_table, "</Sm2TiVideoClip>");
+                    if !lumetri_slice.is_empty() {
                         total_grades += 1;
                     }
                 }
@@ -479,19 +510,23 @@ pub fn write_drp_file(
                     } else {
                         let pkey = path_key(&clip.media_path, &clip.name);
                         let video_backed = video_clip_paths.contains(&pkey);
+                        let matched_asset = asset_by_id
+                            .get(clip.media_id.as_str())
+                            .copied()
+                            .or_else(|| asset_by_path.get(&pkey).copied());
                         let mref = ensure_media_pool_item(
                             &pkey,
                             clip,
-                            asset_by_id.get(clip.media_id.as_str()).copied(),
+                            matched_asset,
                             video_backed,
                             &mp_video_tpl,
                             &mp_still_tpl,
                             &mp_audio_tpl,
                             &mut media_pool_ids,
                             &mut media_pool_entries,
+                            &mut lockable_blobs,
                         )?;
-                        let dur = asset_by_id
-                            .get(clip.media_id.as_str())
+                        let dur = matched_asset
                             .map(|a| a.duration_frames)
                             .unwrap_or(0)
                             .max(clip.source_out_frame)
@@ -511,11 +546,13 @@ pub fn write_drp_file(
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
                 node = set_child_text(&node, "Start", &abs_start.to_string());
                 node = set_child_text(&node, "Duration", &clip.duration_frames().max(1).to_string());
-                node = set_child_text(
-                    &node,
-                    "VirtualAudioTrackBA",
-                    &mono_channel_mapping(clip.audio_channel.max(1)),
-                );
+                let is_stereo_track = track.audio_channels >= 2;
+                let vat_hex = if is_stereo_track {
+                    stereo_channel_mapping(clip.audio_channel.max(1))
+                } else {
+                    mono_channel_mapping(clip.audio_channel.max(1))
+                };
+                node = set_child_text(&node, "VirtualAudioTrackBA", &vat_hex);
 
                 let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
                     -clip.speed_percent
@@ -736,22 +773,70 @@ pub fn write_drp_file(
             let seq_fps_int = seq.frame_rate.timebase().max(1) as u32;
             let needs_custom_setup =
                 seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
-            if !seq.audio_tracks.is_empty() || needs_custom_setup {
+            if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() || needs_custom_setup {
                 let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
                 if let Some(caps) = re_seq_blob.captures(&tl_block) {
                     let mut blob_bytes = hex_decode(&caps[2])?;
-                    if !seq.audio_tracks.is_empty() {
+                    if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() {
+                        // Order buses so main/root bus is index 0, followed by submixes
+                        let mut ordered_buses: Vec<&nle_core::AudioBus> = Vec::new();
+                        for b in &seq.audio_buses {
+                            if b.is_main || b.parent_bus_id.is_none() {
+                                ordered_buses.push(b);
+                            }
+                        }
+                        for b in &seq.audio_buses {
+                            if !(b.is_main || b.parent_bus_id.is_none()) {
+                                ordered_buses.push(b);
+                            }
+                        }
+                        let mut bus_idx_by_id: HashMap<&str, usize> = HashMap::new();
+                        for (i, b) in ordered_buses.iter().enumerate() {
+                            bus_idx_by_id.insert(b.id.as_str(), i);
+                        }
+                        let bus_specs: Vec<FairlightBusSpec> = ordered_buses
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| {
+                                let parent_idx = b
+                                    .parent_bus_id
+                                    .as_deref()
+                                    .and_then(|pid| bus_idx_by_id.get(pid).copied())
+                                    .filter(|&p| p != i)
+                                    .or_else(|| {
+                                        if i > 0 && !b.is_main {
+                                            Some(0)
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                FairlightBusSpec {
+                                    name: b.name.clone(),
+                                    is_main: b.is_main || parent_idx.is_none(),
+                                    parent_bus_index: parent_idx,
+                                }
+                            })
+                            .collect();
+
                         let specs: Vec<FairlightTrackSpec> = seq
                             .audio_tracks
                             .iter()
-                            .map(|t| FairlightTrackSpec {
-                                is_mono: true,
-                                name: t.name.clone(),
-                                enabled: t.enabled,
-                                locked: t.locked,
+                            .map(|t| {
+                                let bus_index = t
+                                    .output_bus_id
+                                    .as_deref()
+                                    .and_then(|bid| bus_idx_by_id.get(bid).copied())
+                                    .unwrap_or(0);
+                                FairlightTrackSpec {
+                                    is_mono: t.audio_channels < 2,
+                                    name: t.name.clone(),
+                                    enabled: t.enabled,
+                                    locked: t.locked,
+                                    bus_index,
+                                }
                             })
                             .collect();
-                        match rebuild_fairlight_track_model(&blob_bytes, &specs) {
+                        match rebuild_fairlight_track_model(&blob_bytes, &specs, &bus_specs) {
                             Ok(rebuilt) => blob_bytes = rebuilt,
                             Err(err) => {
                                 messages.push(ConversionMessage {
@@ -796,6 +881,31 @@ pub fn write_drp_file(
             seq.id.clone(),
             format!("   <Element>\n{tl_block}\n   </Element>"),
         ));
+    }
+
+    // Optionally include unplaced project bin media items (preserving their file & custom metadata)
+    if options.include_unused_media {
+        for asset in &project.media_assets {
+            if asset.path.is_empty() && asset.name.is_empty() {
+                continue;
+            }
+            let pkey = path_key(&asset.path, &asset.name);
+            if media_pool_ids.contains_key(&pkey) {
+                continue;
+            }
+            let is_video = asset.media_kind != MediaKind::Audio;
+            ensure_media_pool_asset(
+                &pkey,
+                asset,
+                is_video,
+                &mp_video_tpl,
+                &mp_still_tpl,
+                &mp_audio_tpl,
+                &mut media_pool_ids,
+                &mut media_pool_entries,
+                &mut lockable_blobs,
+            )?;
+        }
     }
 
     // Build Master MpFolder.xml + optional nested bins
@@ -1015,6 +1125,7 @@ fn ensure_media_pool_item(
     mp_audio_tpl: &str,
     media_pool_ids: &mut HashMap<String, String>,
     media_pool_entries: &mut Vec<(String, String)>,
+    lockable_blobs: &mut Vec<String>,
 ) -> NleResult<String> {
     if let Some(existing_id) = media_pool_ids.get(pkey) {
         return Ok(existing_id.clone());
@@ -1060,7 +1171,7 @@ fn ensure_media_pool_item(
     let mut node = replace_root_db_id(tpl, &item_id);
     node = set_child_text(&node, "UniqueMediaPoolItemId", &Uuid::new_v4().to_string());
     node = set_child_text(&node, "Name", &xml_escape(&display_name));
-    node = rewrite_media_pool_av_blobs(
+    let (rewritten, primary_info_id) = rewrite_media_pool_av_blobs(
         &node,
         &full_path,
         &display_name,
@@ -1072,6 +1183,92 @@ fn ensure_media_pool_item(
         sample_rate,
         !is_video,
     )?;
+    node = rewritten;
+
+    if let (Some(a), Some(info_id)) = (asset, primary_info_id.as_deref()) {
+        if let Some(blob) = media_metadata_lockable_blob_xml(info_id, &a.metadata, &a.custom_metadata)
+        {
+            lockable_blobs.push(blob);
+        }
+    }
+
+    media_pool_entries.push((
+        pkey.to_string(),
+        format!("   <Element>\n{node}\n   </Element>"),
+    ));
+    Ok(item_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_media_pool_asset(
+    pkey: &str,
+    asset: &nle_core::MediaAsset,
+    is_video: bool,
+    mp_video_tpl: &str,
+    mp_still_tpl: &str,
+    mp_audio_tpl: &str,
+    media_pool_ids: &mut HashMap<String, String>,
+    media_pool_entries: &mut Vec<(String, String)>,
+    lockable_blobs: &mut Vec<String>,
+) -> NleResult<String> {
+    if let Some(existing_id) = media_pool_ids.get(pkey) {
+        return Ok(existing_id.clone());
+    }
+    let item_id = Uuid::new_v4().to_string();
+    media_pool_ids.insert(pkey.to_string(), item_id.clone());
+
+    let tpl = if is_video {
+        if asset.media_kind == MediaKind::Image {
+            mp_still_tpl
+        } else {
+            mp_video_tpl
+        }
+    } else {
+        mp_audio_tpl
+    };
+
+    let full_path = if !asset.path.is_empty() {
+        asset.path.clone()
+    } else {
+        format!("/{}", asset.name)
+    };
+    let display_name = Path::new(&full_path.replace('\\', "/"))
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| asset.name.clone());
+
+    let duration = asset.duration_frames.max(25);
+    let fps = asset.frame_rate.as_f64();
+    let width = asset.width;
+    let height = asset.height;
+    let source_start = asset.source_tc_frame;
+    let sample_rate = asset.audio_sample_rate;
+
+    let mut node = replace_root_db_id(tpl, &item_id);
+    node = set_child_text(&node, "UniqueMediaPoolItemId", &Uuid::new_v4().to_string());
+    node = set_child_text(&node, "Name", &xml_escape(&display_name));
+    let (rewritten, primary_info_id) = rewrite_media_pool_av_blobs(
+        &node,
+        &full_path,
+        &display_name,
+        duration,
+        fps,
+        width,
+        height,
+        source_start,
+        sample_rate,
+        !is_video,
+    )?;
+    node = rewritten;
+
+    if let Some(info_id) = primary_info_id.as_deref() {
+        if let Some(blob) =
+            media_metadata_lockable_blob_xml(info_id, &asset.metadata, &asset.custom_metadata)
+        {
+            lockable_blobs.push(blob);
+        }
+    }
 
     media_pool_entries.push((
         pkey.to_string(),
@@ -1092,8 +1289,9 @@ fn rewrite_media_pool_av_blobs(
     source_start: i64,
     sample_rate: u32,
     is_standalone_audio: bool,
-) -> NleResult<String> {
+) -> NleResult<(String, Option<String>)> {
     let mut out = xml.to_string();
+    let mut primary_info_id: Option<String> = None;
     let norm = full_path.replace('\\', "/");
     let parent_dir = Path::new(&norm)
         .parent()
@@ -1113,6 +1311,12 @@ fn rewrite_media_pool_av_blobs(
             let mut block = orig_block.clone();
             let old_info_id = extract_attr(&block, info_tag, "DbId").unwrap_or_default();
             let new_info_id = Uuid::new_v4().to_string();
+            if primary_info_id.is_none()
+                && ((info_tag == "BtVideoInfo" && !is_standalone_audio)
+                    || (info_tag == "BtAudioInfo" && is_standalone_audio))
+            {
+                primary_info_id = Some(new_info_id.clone());
+            }
             block = replace_attr_first(&block, info_tag, "DbId", &new_info_id);
 
             if let Some(clip_hex) = extract_tag_inner(&block, "Clip") {
@@ -1226,7 +1430,7 @@ fn rewrite_media_pool_av_blobs(
         }
     }
 
-    Ok(out)
+    Ok((out, primary_info_id))
 }
 
 fn patch_utf16_keyed_bytes(raw: &mut [u8], key: &str, value_type: u32, new_val: &[u8]) {
@@ -1402,7 +1606,8 @@ fn build_track_xml(
     node = set_child_text(&node, "FusionCompHolderItems", "");
     node = set_child_text(&node, "LayersVec", "");
     if is_audio {
-        node = set_child_text(&node, "SubType", "1");
+        let sub_type = if track.audio_channels >= 2 { "0" } else { "1" };
+        node = set_child_text(&node, "SubType", sub_type);
     }
     node = set_child_text(&node, "UserDefinedName", &xml_escape(&track.name));
     let base_flags: u32 = extract_tag_inner(&node, "Flags")

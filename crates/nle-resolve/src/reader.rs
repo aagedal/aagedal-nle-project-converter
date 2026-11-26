@@ -1,12 +1,17 @@
+use crate::audio::{decode_fairlight_mixer, FairlightMixerData};
 use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
 };
-use crate::timemap::decode_media_timemap;
+use crate::grade::has_resolve_stabilization;
+use crate::state::{
+    decode_lockable_blob, decode_media_metadata_blob, resolve_color_to_premiere_label,
+};
+use crate::timemap::decode_media_timemap_detail;
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
-    SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance, Marker,
+    MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project,
+    ProjectBin, ProjectReader, Rational, Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -57,6 +62,61 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback_name);
 
+    // Decode sequence markers, per-clip markers/colors, and MediaPool clip metadata from project.xml LockableBlobs.
+    let mut seq_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
+    let mut clip_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
+    let mut clip_color_by_id: HashMap<String, u32> = HashMap::new();
+    let mut media_meta_by_info_id: HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
+        HashMap::new();
+    if let Some(proj_xml) = members.get("project.xml") {
+        let sanitized = sanitize_resolve_xml(proj_xml);
+        if let Ok(doc) = Document::parse(&sanitized) {
+            for node in doc.root_element().descendants().filter(|n| n.is_element()) {
+                match node.tag_name().name() {
+                    "Sm2SequenceLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (markers, _) = decode_lockable_blob(&hex, MarkerScope::Sequence);
+                            if !markers.is_empty() {
+                                seq_markers_by_id.entry(owner).or_default().extend(markers);
+                            }
+                        }
+                    }
+                    "Sm2TiItemLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (markers, color) = decode_lockable_blob(&hex, MarkerScope::Clip);
+                            if !markers.is_empty() {
+                                clip_markers_by_id
+                                    .entry(owner.clone())
+                                    .or_default()
+                                    .extend(markers);
+                            }
+                            if let Some(c) = color {
+                                clip_color_by_id.insert(owner, c);
+                            }
+                        }
+                    }
+                    "BtMetadataLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (std_m, custom_m) = decode_media_metadata_blob(&hex);
+                            if !std_m.is_empty() || !custom_m.is_empty() {
+                                let entry = media_meta_by_info_id.entry(owner).or_default();
+                                entry.0.extend(std_m);
+                                entry.1.extend(custom_m);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     struct SeqMeta {
         name: String,
         kind: SequenceKind,
@@ -64,6 +124,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         height: u32,
         fps: Rational,
         start_tc_frame: i64,
+        fairlight: Option<FairlightMixerData>,
     }
 
     let mut seq_meta_by_id: HashMap<String, SeqMeta> = HashMap::new();
@@ -125,6 +186,9 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                             .map(|(start_sec, _)| (start_sec * fps.as_f64()).round() as i64)
                             .unwrap_or(0)
                             .max(0);
+                        let fairlight = child_text(seq_el, "FieldsBlob")
+                            .and_then(|h| hex_decode(&h).ok())
+                            .and_then(|b| decode_fairlight_mixer(&b));
                         if !seq_id.is_empty() {
                             if !mp_db_id.is_empty() {
                                 mp_container_by_id
@@ -140,6 +204,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                     height,
                                     fps,
                                     start_tc_frame,
+                                    fairlight,
                                 },
                             );
                         }
@@ -188,6 +253,20 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                         }
                     }
 
+                    let mut item_std_meta = BTreeMap::new();
+                    let mut item_custom_meta = BTreeMap::new();
+                    for info_node in node
+                        .descendants()
+                        .filter(|n| n.has_tag_name("BtVideoInfo") || n.has_tag_name("BtAudioInfo"))
+                    {
+                        if let Some(info_id) = info_node.attribute("DbId") {
+                            if let Some((sm, cm)) = media_meta_by_info_id.get(info_id) {
+                                item_std_meta.extend(sm.clone());
+                                item_custom_meta.extend(cm.clone());
+                            }
+                        }
+                    }
+
                     if !db_id.is_empty() {
                         media_assets.insert(
                             db_id.clone(),
@@ -205,6 +284,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                 audio_channels: 2,
                                 audio_sample_rate: 48_000,
                                 color_space: None,
+                                metadata: item_std_meta,
+                                custom_metadata: item_custom_meta,
                             },
                         );
                     }
@@ -220,6 +301,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                 parent_id,
                 media_paths: bin_media_paths,
                 sequence_ids: bin_seq_ids,
+                custom_metadata: BTreeMap::new(),
             });
         }
     }
@@ -259,9 +341,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             fps,
             start_tc_frame,
             &mp_container_by_id,
+            &clip_markers_by_id,
+            &clip_color_by_id,
             &mut media_assets,
         );
-        let audio_tracks = parse_resolve_tracks(
+        let mut audio_tracks = parse_resolve_tracks(
             root,
             "AudioTrackVec",
             TrackKind::Audio,
@@ -270,8 +354,23 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             fps,
             start_tc_frame,
             &mp_container_by_id,
+            &clip_markers_by_id,
+            &clip_color_by_id,
             &mut media_assets,
         );
+
+        let mut audio_buses = Vec::new();
+        if let Some(fl) = meta.and_then(|m| m.fairlight.as_ref()) {
+            audio_buses = fl.buses.clone();
+            for (idx, tr) in audio_tracks.iter_mut().enumerate() {
+                if let Some(&ch) = fl.track_channels.get(&idx) {
+                    tr.audio_channels = ch;
+                }
+                if let Some(bus_id) = fl.track_bus_ids.get(&idx) {
+                    tr.output_bus_id = Some(bus_id.clone());
+                }
+            }
+        }
 
         let dur = video_tracks
             .iter()
@@ -280,6 +379,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             .map(|c| c.end_frame)
             .max()
             .unwrap_or(0);
+
+        let markers = seq_markers_by_id.remove(&seq_id).unwrap_or_default();
 
         sequences.push(Sequence {
             id: seq_id,
@@ -294,9 +395,19 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             mark_out: None,
             video_tracks,
             audio_tracks,
-            markers: Vec::new(),
+            audio_buses,
+            markers,
             metadata: BTreeMap::new(),
         });
+    }
+
+    let mut custom_metadata_schema = BTreeMap::new();
+    for asset in media_assets.values() {
+        for key in asset.custom_metadata.keys() {
+            custom_metadata_schema
+                .entry(key.clone())
+                .or_insert_with(|| key.replace('.', " "));
+        }
     }
 
     Ok(Project {
@@ -309,6 +420,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         media_assets: media_assets.into_values().collect(),
         sequences,
         metadata: BTreeMap::new(),
+        custom_metadata_schema,
     })
 }
 
@@ -322,6 +434,8 @@ fn parse_resolve_tracks(
     seq_fps: Rational,
     start_tc_frame: i64,
     mp_container_by_id: &HashMap<String, (ClipSourceKind, String)>,
+    clip_markers_by_id: &HashMap<String, Vec<Marker>>,
+    clip_color_by_id: &HashMap<String, u32>,
     media_assets: &mut BTreeMap<String, MediaAsset>,
 ) -> Vec<Track> {
     let Some(vec_el) = root.children().find(|n| n.has_tag_name(vec_tag)) else {
@@ -418,9 +532,14 @@ fn parse_resolve_tracks(
                     None => (ClipSourceKind::Media, media_id.clone()),
                 };
 
-                let (speed_percent, reversed) = child_text(cnode, "MediaTimemapBA")
-                    .and_then(|h| decode_media_timemap(&h))
-                    .unwrap_or((100.0, false));
+                let (speed_percent, reversed, freeze_hold_sec) = child_text(cnode, "MediaTimemapBA")
+                    .and_then(|h| decode_media_timemap_detail(&h))
+                    .unwrap_or((100.0, false, None));
+                let effective_in_frame = if let Some(hold_sec) = freeze_hold_sec {
+                    (hold_sec * seq_fps.as_f64()).round() as i64
+                } else {
+                    in_frame
+                };
 
                 let (active_angle, link_group_id) = child_text(cnode, "FieldsBlob")
                     .map(|h| decode_clip_fields_blob(&h, &clip_db_id))
@@ -446,6 +565,43 @@ fn parse_resolve_tracks(
                     }
                 }
 
+                let label_preset_index = clip_color_by_id
+                    .get(&clip_db_id)
+                    .and_then(|&c| resolve_color_to_premiere_label(c));
+                let label_name =
+                    label_preset_index.map(|idx| format!("BE.Prefs.LabelColors.{idx}"));
+                let clip_markers = clip_markers_by_id
+                    .get(&clip_db_id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut clip_effects = Vec::new();
+                if kind == TrackKind::Video {
+                    let has_stab = cnode
+                        .children()
+                        .find(|n| n.has_tag_name("pLmVerTable"))
+                        .map(|vt| {
+                            vt.descendants()
+                                .filter(|n| n.has_tag_name("Body"))
+                                .filter_map(|b| b.text())
+                                .any(has_resolve_stabilization)
+                        })
+                        .unwrap_or(false);
+                    if has_stab {
+                        clip_effects.push(EffectInstance {
+                            id: "resolve-stab".to_string(),
+                            match_name: "resolve.inspector.stabilization".to_string(),
+                            display_name: "Stabilization".to_string(),
+                            category: EffectCategory::Stabilization,
+                            media_kind: TrackKind::Video,
+                            enabled: true,
+                            is_intrinsic: false,
+                            is_animated: false,
+                            parameters: Vec::new(),
+                        });
+                    }
+                }
+
                 clips.push(Clip {
                     id: clip_db_id,
                     name: cname,
@@ -460,8 +616,8 @@ fn parse_resolve_tracks(
                     active_angle,
                     start_frame: start,
                     end_frame: start + dur,
-                    source_in_frame: in_frame,
-                    source_out_frame: in_frame + dur,
+                    source_in_frame: effective_in_frame,
+                    source_out_frame: effective_in_frame + dur,
                     source_in_ticks: None,
                     source_out_ticks: None,
                     source_fps: clip_fps,
@@ -472,16 +628,28 @@ fn parse_resolve_tracks(
                     enabled: true,
                     audio_channel,
                     link_group_id,
-                    label_name: None,
-                    label_preset_index: None,
+                    label_name,
+                    label_preset_index,
                     motion,
                     opacity,
                     lumetri_effects: Vec::new(),
-                    effects: Vec::new(),
-                    markers: Vec::new(),
+                    effects: clip_effects,
+                    markers: clip_markers,
                 });
             }
         }
+
+        let audio_channels = if kind == TrackKind::Audio {
+            match child_text(track_el, "SubType")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                Some(1) => 1,
+                Some(0) => 2,
+                _ => 2,
+            }
+        } else {
+            0
+        };
 
         tracks.push(Track {
             index: idx + 1,
@@ -491,6 +659,8 @@ fn parse_resolve_tracks(
             locked,
             muted: disabled,
             solo: false,
+            audio_channels,
+            output_bus_id: None,
             clips,
             transitions,
             markers: Vec::new(),

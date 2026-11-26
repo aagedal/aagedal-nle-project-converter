@@ -206,10 +206,13 @@ pub fn analyze_project_effects(
                     .cloned()
                     .collect();
 
+                let native_supported = matches!(
+                    target_format,
+                    NleFormat::DaVinciResolve | NleFormat::PremierePro
+                );
+
                 let default_action = match rule.fidelity {
-                    MappingFidelity::NativeAutomatic
-                        if target_format == NleFormat::DaVinciResolve =>
-                    {
+                    MappingFidelity::NativeAutomatic if native_supported => {
                         MappingAction::NativeConvert
                     }
                     _ => {
@@ -226,7 +229,7 @@ pub fn analyze_project_effects(
                 };
 
                 let effective_fidelity = if rule.fidelity == MappingFidelity::NativeAutomatic
-                    && target_format != NleFormat::DaVinciResolve
+                    && !native_supported
                 {
                     if targets.is_empty() {
                         MappingFidelity::Unmapped
@@ -330,14 +333,17 @@ pub fn apply_effect_decisions(
 
     for seq in &mut project.sequences {
         let mut new_markers: Vec<Marker> = Vec::new();
-        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+        for track in seq.video_tracks.iter_mut().chain(seq.audio_tracks.iter_mut()) {
             let track_prefix = if track.kind == TrackKind::Video {
                 format!("V{}", track.index)
             } else {
                 format!("A{}", track.index)
             };
-            for clip in &track.clips {
-                for eff in &clip.effects {
+            for clip in &mut track.clips {
+                let clip_name = clip.name.clone();
+                let clip_start = clip.start_frame;
+                let clip_dur = clip.duration_frames().max(1);
+                for eff in &mut clip.effects {
                     if eff.is_intrinsic {
                         continue;
                     }
@@ -346,6 +352,10 @@ pub fn apply_effect_decisions(
                         .get(&key)
                         .cloned()
                         .unwrap_or(MappingAction::PlaceMarkerOnly);
+
+                    if matches!(action, MappingAction::Skip | MappingAction::PlaceMarkerOnly) {
+                        eff.enabled = false;
+                    }
 
                     let param_preview: String = eff
                         .parameters
@@ -362,7 +372,7 @@ pub fn apply_effect_decisions(
                                 severity: Severity::Info,
                                 code: "FX_NATIVE".into(),
                                 sequence: Some(seq.name.clone()),
-                                clip: Some(clip.name.clone()),
+                                clip: Some(clip_name.clone()),
                                 message: format!("Natively converted {}", eff.display_name),
                             });
                         }
@@ -375,17 +385,17 @@ pub fn apply_effect_decisions(
                                 let comment = if param_preview.is_empty() {
                                     format!(
                                         "[{track_prefix} · {}] Mapped '{}' → {}",
-                                        clip.name, eff.display_name, target_display_name
+                                        clip_name, eff.display_name, target_display_name
                                     )
                                 } else {
                                     format!(
                                         "[{track_prefix} · {}] Mapped '{}' → {} | Source params: {}",
-                                        clip.name, eff.display_name, target_display_name, param_preview
+                                        clip_name, eff.display_name, target_display_name, param_preview
                                     )
                                 };
                                 new_markers.push(Marker {
-                                    frame: clip.start_frame,
-                                    duration_frames: clip.duration_frames().max(1),
+                                    frame: clip_start,
+                                    duration_frames: clip_dur,
                                     name: format!("FX → {}", target_display_name),
                                     comment,
                                     color: "Purple".to_string(),
@@ -397,7 +407,7 @@ pub fn apply_effect_decisions(
                                 severity: Severity::Info,
                                 code: "FX_MAPPED".into(),
                                 sequence: Some(seq.name.clone()),
-                                clip: Some(clip.name.clone()),
+                                clip: Some(clip_name.clone()),
                                 message: format!(
                                     "{} → {} (review marker {})",
                                     eff.display_name,
@@ -411,17 +421,17 @@ pub fn apply_effect_decisions(
                                 let comment = if param_preview.is_empty() {
                                     format!(
                                         "[{track_prefix} · {}] Unmapped effect '{}' ({})",
-                                        clip.name, eff.display_name, eff.match_name
+                                        clip_name, eff.display_name, eff.match_name
                                     )
                                 } else {
                                     format!(
                                         "[{track_prefix} · {}] Unmapped effect '{}' ({}) | Params: {}",
-                                        clip.name, eff.display_name, eff.match_name, param_preview
+                                        clip_name, eff.display_name, eff.match_name, param_preview
                                     )
                                 };
                                 new_markers.push(Marker {
-                                    frame: clip.start_frame,
-                                    duration_frames: clip.duration_frames().max(1),
+                                    frame: clip_start,
+                                    duration_frames: clip_dur,
                                     name: format!("Unmapped FX: {}", eff.display_name),
                                     comment,
                                     color: "Red".to_string(),
@@ -433,7 +443,7 @@ pub fn apply_effect_decisions(
                                 severity: Severity::Warning,
                                 code: "FX_UNMAPPED".into(),
                                 sequence: Some(seq.name.clone()),
-                                clip: Some(clip.name.clone()),
+                                clip: Some(clip_name.clone()),
                                 message: format!(
                                     "Unmapped effect '{}' ({}) flagged via timeline marker",
                                     eff.display_name, eff.match_name
@@ -445,7 +455,7 @@ pub fn apply_effect_decisions(
                                 severity: Severity::Info,
                                 code: "FX_SKIPPED".into(),
                                 sequence: Some(seq.name.clone()),
-                                clip: Some(clip.name.clone()),
+                                clip: Some(clip_name.clone()),
                                 message: format!("Skipped effect '{}' per user choice", eff.display_name),
                             });
                         }
@@ -595,6 +605,8 @@ mod tests {
                 locked: false,
                 muted: false,
                 solo: false,
+                audio_channels: 0,
+                output_bus_id: None,
                 clips: vec![Clip {
                     id: "c1".into(),
                     name: "A001.mov".into(),
@@ -649,6 +661,7 @@ mod tests {
                 markers: vec![],
             }],
             audio_tracks: vec![],
+            audio_buses: vec![],
             markers: vec![],
             metadata: BTreeMap::new(),
         });

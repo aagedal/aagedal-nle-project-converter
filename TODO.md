@@ -19,8 +19,8 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
 
 - [x] **Adobe Premiere Pro 2026 live test project** *(Priority #1 & #2)*
   - Automated CEP ExtendScript generator (`scripts/premiere/build_premiere_corpus.py`) producing multi-track V1/V2 + A1-A3, Unicode filenames, Lumetri, Motion keyframes, Opacity, Gaussian Blur, Cross Dissolve, Constant Power, markers, retiming (`50%` Optical Flow, `200%`, `-100%` `<PlayBackwards>`), Interpret Footage (`<IsFrameRateOverridden>` / `<OveriddenFrameRate>` + Start TC + PAR), nested sequence (`Sub_B_Roll`), and 3-angle multicam (`<IsMulticam>` + `<SelectedTrackIndex>`).
-  - Schema documented in [docs/PREMIERE_2026_SCHEMA.md](docs/PREMIERE_2026_SCHEMA.md) alongside live Resolve → Premiere FCP7 XML import findings.
-  - Remaining: test native `.drp → .prproj` writer re-import back into Premiere Pro 2026 once implemented.
+  - Schema documented in [docs/PREMIERE_2026_SCHEMA.md](docs/PREMIERE_2026_SCHEMA.md) alongside live Resolve → Premiere FCP7 XML and native `.drp → .prproj` import findings.
+  - Verified native `.drp → .prproj` writer live in Premiere Pro 2026 (`Resolve21_Corpus.drp` & `05_Respeed_And_ClipAttributes.drt`: all 7+1 sequences, bins, `MZ.ZeroPoint` 01:00:00:00, sequence markers, `<Link>` groups, `AE.ADBE Motion` / `AE.ADBE Opacity`, Cross Dissolve / Constant Power transitions, nested timelines, compound clips, native 3-angle `<IsMulticam>` cuts, `50%`/`200%`/`-100%`/freeze retiming, and clean Premiere re-save).
 
 - [ ] **Final Cut Pro live test project** *(Priority #3 & #4)*
   - Export real timelines from Final Cut Pro (`.fcpxml` / `.fcpxmld`) with connected clips, secondary storylines, compound clips, multicam clips, titles, transitions, retiming, and markers.
@@ -45,13 +45,15 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Add a user option to flatten nested/multicam cuts to source clips when targeting formats that don't support them, and emit `<ref-clip>` / `<mc-clip>` in `.fcpxml` writer.
 - [ ] **Variable speed ramps & full Clip Attributes IR (`nle-core`, `nle-premiere`, `nle-resolve`)**
   - Capture and model multi-point speed curves, alpha mode, data levels, and source audio channel mapping (`VirtualAudioTracksBA`).
-- [ ] **Stereo vs. mono Fairlight track configuration (`nle-resolve` writer)**
-  - Preserve Premiere Pro stereo vs. mono track layouts (`AudioClipTrack` `ChannelType`) in Resolve's `FLStudioModelBA` and `VirtualAudioTrackBA` (Premiere `<Link>` clip linking is already translated via `FieldsBlob` `f1.f1.f1`).
-- [ ] **Optional unused Media Pool bin media preservation**
-  - Add a conversion option to include unplaced project bin media items in the target Resolve Media Pool (currently only timeline-referenced media is written).
+- [x] **Stereo vs. mono Fairlight tracks & multi-bus / submix audio routing (`nle-core`, `nle-resolve`, `nle-premiere`)**
+  - Preserves stereo vs. mono audio track layouts (`Sm2TiTrack/SubType`, `VirtualAudioTrackBA`, `FLStudioModelBA` Section 0 ↔ Premiere `AudioClipTrack` `ChannelType`) and bidirectional multi-bus routing (Resolve Fairlight FlexBus Section 7 main/sub buses ↔ Premiere `AudioTrackGroup` `MasterTrack`/`SubMixTracks`/`AudioTrackInlet`/`Assign`).
+- [x] **Unused Media Pool bin media & clip/custom metadata preservation (`nle-core`, `nle-premiere`, `nle-resolve`)**
+  - Added `include_unused_media` option (default `true`) to preserve unplaced project bin media items across Premiere Pro and DaVinci Resolve Media Pools (skipping Premiere `<IsProxy>true</IsProxy>` duplicates).
+  - Added bidirectional standard clip metadata (`Description`, `Comments`, `Scene`, `Shot`, `Take`, `Keywords`, `Tape Name`, etc.) and custom/third-party project metadata (`Project.Metadata.Schema` / `ClipProjectItem` properties ↔ Resolve 21.2 `BtMetadataLockableBlob` `ThirdPartyMetadata`), scoped strictly to Premiere ↔ Resolve (omitted from FCPXML/OTIO/FCP7 exports).
 - [ ] **Native codec metadata on generated Resolve `MediaPoolItem`s**
   - Avoid inheriting placeholder `H.264/AAC` codec metadata strings from the scaffold template when source media is ProRes, HEVC, MXF, or MP3/WAV so Resolve displays accurate clip properties before relink/refresh.
 - [ ] **Connected video/audio lanes & transitions in FCPXML writer (`nle-interchange`)**
   - Emit connected `<asset-clip lane="...">` elements for `V2+` and audio tracks plus `<transition>` elements in `.fcpxml` output.
-- [ ] **Native `.prproj` writer (`nle-premiere`)**
-  - Enable direct `.drp → .prproj` and `.fcpxml → .prproj` conversion without intermediate FCP7 XML.
+- [x] **Native `.prproj` writer (`nle-premiere`) & Resolve marker/color decoding (`nle-resolve`)**
+  - Direct `.drp → .prproj` (and IR → `.prproj`) native Premiere Pro 2026 (`Version="45"`) writer in `crates/nle-premiere/src/writer.rs`, wired into CLI (`nle-convert`) and GPUI GUI (`nle-gui`, now default target when opening `.drp` files).
+  - Added Resolve 21.2 `Sm2SequenceLockableBlob` / `Sm2TiItemLockableBlob` decoding (`0x80` and `0x81` zstd) for timeline markers, clip markers, clip colors, and freeze-frame hold offsets in `nle-resolve`, plus `MZ.ZeroPoint` & Motion crop reading in `nle-premiere`.

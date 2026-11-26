@@ -9,6 +9,7 @@ use std::path::Path;
 
 pub const SUPPORTED_TARGETS: &[(NleFormat, &str)] = &[
     (NleFormat::DaVinciResolve, "DaVinci Resolve Native (.drp)"),
+    (NleFormat::PremierePro, "Adobe Premiere Pro Native (.prproj)"),
     (NleFormat::FinalCutPro, "Final Cut Pro (.fcpxml)"),
     (NleFormat::OpenTimelineIo, "OpenTimelineIO (.otio)"),
     (NleFormat::Fcp7Xml, "FCP7 XML (.xml — Premiere / Resolve)"),
@@ -39,7 +40,7 @@ pub fn load_project_from_disk(path: &Path) -> Result<Project, String> {
 pub fn effective_target_for(source_format: NleFormat, requested_target: NleFormat) -> NleFormat {
     if source_format == requested_target {
         match source_format {
-            NleFormat::DaVinciResolve => NleFormat::FinalCutPro,
+            NleFormat::DaVinciResolve => NleFormat::PremierePro,
             _ => NleFormat::DaVinciResolve,
         }
     } else {
@@ -103,6 +104,10 @@ pub fn run_conversion(
     }
 
     let mut report = match options.target_format {
+        NleFormat::PremierePro => {
+            nle_premiere::write_prproj_file(&project, output_path, &options)
+                .map_err(|e| e.to_string())?
+        }
         NleFormat::DaVinciResolve => {
             nle_resolve::write_drp_file(&project, output_path, &options).map_err(|e| e.to_string())?
         }
@@ -120,7 +125,7 @@ pub fn run_conversion(
         }
         other => {
             return Err(format!(
-                "Direct writing to {} is on the roadmap — please select Resolve (.drp), Final Cut Pro (.fcpxml), OTIO (.otio), or FCP7 XML (.xml).",
+                "Direct writing to {} is on the roadmap — please select Premiere Pro (.prproj), Resolve (.drp), Final Cut Pro (.fcpxml), OTIO (.otio), or FCP7 XML (.xml).",
                 other.display_name()
             ));
         }
@@ -154,7 +159,7 @@ mod tests {
         );
         assert_eq!(
             effective_target_for(NleFormat::DaVinciResolve, NleFormat::DaVinciResolve),
-            NleFormat::FinalCutPro
+            NleFormat::PremierePro
         );
         assert_eq!(
             effective_target_for(NleFormat::PremierePro, NleFormat::OpenTimelineIo),
@@ -198,7 +203,7 @@ mod tests {
         let reloaded = load_and_inspect_project(&drp_path, NleFormat::DaVinciResolve)
             .expect("reload written drp");
         assert_eq!(reloaded.inspection.source_format, NleFormat::DaVinciResolve);
-        assert_eq!(reloaded.effect_plan.target_format, NleFormat::FinalCutPro);
+        assert_eq!(reloaded.effect_plan.target_format, NleFormat::PremierePro);
 
         // Save and reload an effect mapping preset
         let preset_path = dir.join("preset.json");

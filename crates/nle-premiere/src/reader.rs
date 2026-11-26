@@ -1,10 +1,10 @@
 use crate::lumetri::{child_text, find_descendant, nested_text, parse_keyframe_scalar, parse_lumetri_component};
 use flate2::read::GzDecoder;
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance,
-    EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
-    SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, AudioBus, Clip, ClipSourceKind, ColorConfig, EffectCategory,
+    EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -97,7 +97,8 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
         .unwrap_or(true);
 
     let color_config = extract_color_config(root);
-    let bins = extract_bins(root, &by_id, &by_uid);
+    let custom_metadata_schema = extract_custom_metadata_schema(root);
+    let bins = extract_bins(root, &by_id, &by_uid, &custom_metadata_schema);
     let link_map = extract_link_groups(root, &by_id);
 
     let mut media_map: BTreeMap<String, MediaAsset> = BTreeMap::new();
@@ -136,10 +137,63 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
         }
     }
 
-    // Also collect any project-level Media elements not yet referenced in sequences
+    // Collect metadata & unplaced bin assets from all ClipProjectItems (project bin clips)
+    let (meta_by_id, meta_by_path) =
+        extract_clip_project_item_metadata(root, &by_id, &by_uid, &custom_metadata_schema, &mut media_map);
+
+    // Also collect any remaining project-level Media elements not yet referenced (skip proxies & secondary streams)
+    let mut known_paths: std::collections::HashSet<String> = media_map
+        .values()
+        .filter(|a| !a.path.is_empty())
+        .map(|a| a.path.clone())
+        .collect();
     for media_node in root.children().filter(|n| n.has_tag_name("Media")) {
+        if child_text(media_node, "IsProxy")
+            .map(|s| s.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if child_text(media_node, "StreamNumber")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            > 0
+        {
+            continue;
+        }
         if let Some(asset) = extract_media_asset(media_node, &by_id) {
-            media_map.entry(asset.id.clone()).or_insert(asset);
+            if !media_map.contains_key(&asset.id) && !known_paths.contains(&asset.path) {
+                known_paths.insert(asset.path.clone());
+                media_map.insert(asset.id.clone(), asset);
+            }
+        }
+    }
+
+    // Merge ClipProjectItem standard + custom metadata onto every matching MediaAsset
+    for asset in media_map.values_mut() {
+        if let Some((sm, cm)) = meta_by_id.get(&asset.id) {
+            for (k, v) in sm {
+                asset.metadata.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            for (k, v) in cm {
+                asset
+                    .custom_metadata
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
+            }
+        }
+        if !asset.path.is_empty() {
+            if let Some((sm, cm)) = meta_by_path.get(&asset.path) {
+                for (k, v) in sm {
+                    asset.metadata.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                for (k, v) in cm {
+                    asset
+                        .custom_metadata
+                        .entry(k.clone())
+                        .or_insert_with(|| v.clone());
+                }
+            }
         }
     }
 
@@ -153,6 +207,7 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
         media_assets: media_map.into_values().collect(),
         sequences,
         metadata: BTreeMap::new(),
+        custom_metadata_schema,
     })
 }
 
@@ -220,10 +275,244 @@ fn resolve_node<'a, 'input>(
     None
 }
 
+fn extract_custom_metadata_schema(root: Node<'_, '_>) -> BTreeMap<String, String> {
+    let mut schema = BTreeMap::new();
+    let Some(schema_node) = root
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "Project.Metadata.Schema")
+    else {
+        return schema;
+    };
+    let Some(raw_xml) = schema_node.text().filter(|s| !s.trim().is_empty()) else {
+        return schema;
+    };
+    let Ok(doc) = Document::parse(raw_xml) else {
+        return schema;
+    };
+    for prop in doc
+        .root_element()
+        .descendants()
+        .filter(|n| n.is_element() && n.has_tag_name("xmp_property"))
+    {
+        if let Some(name) = prop.attribute("name").filter(|s| !s.is_empty()) {
+            let label = prop
+                .attribute("label")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(name);
+            schema.insert(name.to_string(), label.to_string());
+        }
+    }
+    schema
+}
+
+fn is_ignored_premiere_ui_prop(tag: &str) -> bool {
+    tag.starts_with("project.")
+        || tag.starts_with("list.view.")
+        || tag.starts_with("ProjectViewState.")
+        || tag.starts_with("TL.")
+        || tag.starts_with("MZ.")
+        || tag.starts_with("AMM.")
+        || tag.starts_with("Monitor.")
+        || tag == "Column.PropertyText.Label"
+}
+
+fn map_premiere_column_prop_to_canonical(tag: &str) -> Option<&'static str> {
+    match tag {
+        "Column.PropertyText.Description" => Some("Description"),
+        "Column.PropertyText.Comment" => Some("Comments"),
+        "Column.PropertyText.LogNote" => Some("Log Note"),
+        "Column.PropertyText.Scene" => Some("Scene"),
+        "Column.PropertyText.Shot" => Some("Shot"),
+        "Column.PropertyText.Take" => Some("Take"),
+        "Column.PropertyText.Keywords" => Some("Keywords"),
+        "Column.PropertyText.Client" => Some("Client"),
+        "Column.PropertyText.TapeName" => Some("Tape Name"),
+        "Column.PropertyText.Good" => Some("Good Take"),
+        "Column.PropertyText.CameraAngle" => Some("Angle"),
+        "Column.PropertyText.CameraLabel" => Some("Camera #"),
+        _ => None,
+    }
+}
+
+fn extract_node_properties_metadata(
+    props_node: Node<'_, '_>,
+    custom_schema: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut std_meta = BTreeMap::new();
+    let mut custom_meta = BTreeMap::new();
+    for ch in props_node.children().filter(|n| n.is_element()) {
+        let tag = ch.tag_name().name();
+        if is_ignored_premiere_ui_prop(tag) {
+            continue;
+        }
+        let val = ch.text().unwrap_or("").trim();
+        if val.is_empty() {
+            continue;
+        }
+        if custom_schema.contains_key(tag) {
+            custom_meta.insert(tag.to_string(), val.to_string());
+        } else if let Some(canon) = map_premiere_column_prop_to_canonical(tag) {
+            std_meta.insert(canon.to_string(), val.to_string());
+        } else if let Some(rest) = tag.strip_prefix("Column.PropertyText.") {
+            if !rest.is_empty() {
+                std_meta.insert(rest.to_string(), val.to_string());
+            }
+        } else if !tag.starts_with("Column.") {
+            custom_meta.insert(tag.to_string(), val.to_string());
+        }
+    }
+    (std_meta, custom_meta)
+}
+
+#[allow(clippy::type_complexity)]
+fn extract_clip_project_item_metadata(
+    root: Node<'_, '_>,
+    by_id: &HashMap<&str, Node<'_, '_>>,
+    by_uid: &HashMap<&str, Node<'_, '_>>,
+    custom_schema: &BTreeMap<String, String>,
+    media_map: &mut BTreeMap<String, MediaAsset>,
+) -> (
+    HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)>,
+    HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)>,
+) {
+    let mut by_media_id: HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
+        HashMap::new();
+    let mut by_media_path: HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
+        HashMap::new();
+
+    for cpi in root.children().filter(|n| n.has_tag_name("ClipProjectItem")) {
+        let (mut std_meta, custom_meta) = cpi
+            .children()
+            .find(|n| n.has_tag_name("ProjectItem"))
+            .and_then(|pi| pi.children().find(|n| n.has_tag_name("Node")))
+            .and_then(|node| node.children().find(|n| n.has_tag_name("Properties")))
+            .map(|props| extract_node_properties_metadata(props, custom_schema))
+            .unwrap_or_default();
+
+        let Some(master) = cpi
+            .children()
+            .find(|n| n.has_tag_name("MasterClip"))
+            .and_then(|r| resolve_node(r, by_id, by_uid))
+        else {
+            continue;
+        };
+
+        // Read ClipLoggingInfo fields (TapeName, Description, LogNote, Comment, Scene, Shot, TC, duration)
+        let mut log_fps: Option<Rational> = None;
+        let mut log_tc_frame: Option<i64> = None;
+        let mut log_dur_frames: Option<i64> = None;
+        if let Some(cli) = master
+            .children()
+            .find(|n| n.has_tag_name("LoggingInfo"))
+            .and_then(|r| resolve_node(r, by_id, by_uid))
+        {
+            for (xml_tag, canon) in [
+                ("Description", "Description"),
+                ("Comment", "Comments"),
+                ("LogNote", "Log Note"),
+                ("TapeName", "Tape Name"),
+                ("Scene", "Scene"),
+                ("Shot", "Shot"),
+            ] {
+                if let Some(v) = child_text(cli, xml_tag)
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                {
+                    std_meta.entry(canon.to_string()).or_insert(v);
+                }
+            }
+            if let Some(mfr) = child_text(cli, "MediaFrameRate")
+                .and_then(|s| s.trim().parse::<i64>().ok())
+                .filter(|&v| v > 0 && v < 9_000_000_000_000_000_000)
+            {
+                let rate = Rational::from_adobe_frame_ticks(mfr);
+                if rate.as_f64() <= 1000.0 {
+                    log_fps = Some(rate);
+                }
+            }
+            let mip = child_text(cli, "MediaInPoint").and_then(|s| s.trim().parse::<i64>().ok());
+            let mop = child_text(cli, "MediaOutPoint").and_then(|s| s.trim().parse::<i64>().ok());
+            let fps_for_log = log_fps.unwrap_or(Rational::FPS_25);
+            if let Some(mip_t) = mip.filter(|&v| v >= 0) {
+                log_tc_frame = Some(fps_for_log.adobe_ticks_to_frames(mip_t));
+            }
+            if let (Some(mip_t), Some(mop_t)) = (mip, mop) {
+                if mop_t > mip_t {
+                    log_dur_frames = Some(fps_for_log.adobe_ticks_to_frames(mop_t - mip_t));
+                }
+            }
+        }
+
+        // Resolve the primary Media node referenced by this MasterClip (prefer VideoClip over AudioClip)
+        let Some(clips_el) = master.children().find(|n| n.has_tag_name("Clips")) else {
+            continue;
+        };
+        let mut chosen_media: Option<(String, String, Node<'_, '_>)> = None;
+        let mut is_sequence_master = false;
+        for clip_ref in clips_el.children().filter(|n| n.has_tag_name("Clip")) {
+            let Some(clip_el) = resolve_node(clip_ref, by_id, by_uid) else {
+                continue;
+            };
+            if find_sequence_uid_for_clip(clip_el, by_id, by_uid).is_some() {
+                is_sequence_master = true;
+                break;
+            }
+            if let Some(found) = find_media_for_clip(clip_el, by_id, by_uid) {
+                let has_vs = found.2.children().any(|n| n.has_tag_name("VideoStream"));
+                if chosen_media.is_none() || has_vs {
+                    chosen_media = Some(found);
+                    if has_vs {
+                        break;
+                    }
+                }
+            }
+        }
+        if is_sequence_master {
+            continue;
+        }
+        let Some((path, media_id, media_node)) = chosen_media else {
+            continue;
+        };
+
+        // Ensure unplaced bin media items exist in media_map with accurate properties
+        if let Some(mut asset) = extract_media_asset(media_node, by_id) {
+            if let Some(f) = log_fps {
+                if asset.frame_rate == Rational::FPS_25 && f != Rational::FPS_25 {
+                    asset.frame_rate = f;
+                }
+            }
+            if let Some(tc) = log_tc_frame {
+                asset.source_tc_frame = tc;
+                asset.source_tc_string = frames_to_timecode(tc, asset.frame_rate);
+            }
+            if let Some(dur) = log_dur_frames {
+                asset.duration_frames = asset.duration_frames.max(dur);
+            }
+            media_map.entry(asset.id.clone()).or_insert(asset);
+        }
+
+        if !std_meta.is_empty() || !custom_meta.is_empty() {
+            if !media_id.is_empty() {
+                let entry = by_media_id.entry(media_id).or_default();
+                entry.0.extend(std_meta.clone());
+                entry.1.extend(custom_meta.clone());
+            }
+            if !path.is_empty() {
+                let entry = by_media_path.entry(path).or_default();
+                entry.0.extend(std_meta);
+                entry.1.extend(custom_meta);
+            }
+        }
+    }
+
+    (by_media_id, by_media_path)
+}
+
 fn extract_bins(
     root: Node<'_, '_>,
     by_id: &HashMap<&str, Node<'_, '_>>,
     by_uid: &HashMap<&str, Node<'_, '_>>,
+    custom_schema: &BTreeMap<String, String>,
 ) -> Vec<ProjectBin> {
     let bin_nodes: Vec<_> = root
         .children()
@@ -296,12 +585,21 @@ fn extract_bins(
             }
         }
 
+        let bin_custom_meta = bin_el
+            .children()
+            .find(|n| n.has_tag_name("ProjectItem"))
+            .and_then(|pi| pi.children().find(|n| n.has_tag_name("Node")))
+            .and_then(|node| node.children().find(|n| n.has_tag_name("Properties")))
+            .map(|props| extract_node_properties_metadata(props, custom_schema).1)
+            .unwrap_or_default();
+
         result.push(ProjectBin {
             id: uid.to_string(),
             name,
             parent_id: parent_by_uid.get(uid).cloned(),
             media_paths,
             sequence_ids,
+            custom_metadata: bin_custom_meta,
         });
     }
     result
@@ -432,6 +730,8 @@ fn extract_media_asset(
         audio_channels: 2,
         audio_sample_rate: 48_000,
         color_space: None,
+        metadata: BTreeMap::new(),
+        custom_metadata: BTreeMap::new(),
     })
 }
 
@@ -579,7 +879,138 @@ fn parse_sequence(
         }
     }
 
+    let mut audio_buses = Vec::new();
+    let mut track_uid_to_bus_id: HashMap<String, String> = HashMap::new();
+    let mut assign_num_to_bus_id: HashMap<String, String> = HashMap::new();
+
     if let Some(atg) = audio_tg {
+        // Parse MasterTrack and SubMixTracks (AudioMixTrack) + their AudioTrackInlet source routing
+        let mut mix_obj_to_bus_id: HashMap<String, String> = HashMap::new();
+        let mut mix_nodes: Vec<(bool, Node<'_, '_>)> = Vec::new();
+
+        if let Some(mt) = atg
+            .children()
+            .find(|n| n.has_tag_name("MasterTrack"))
+            .and_then(|r| resolve_node(r, by_id, by_uid))
+        {
+            mix_nodes.push((true, mt));
+        }
+        if let Some(sub_container) = atg.children().find(|n| n.has_tag_name("SubMixTracks")) {
+            for sm_ref in sub_container
+                .children()
+                .filter(|n| n.has_tag_name("SubMixTrack"))
+            {
+                if let Some(sm) = resolve_node(sm_ref, by_id, by_uid) {
+                    mix_nodes.push((false, sm));
+                }
+            }
+        }
+
+        // First pass: register every mix track's bus ID, Track.ID (for Assign), and ObjectID (for Inlet)
+        let mut main_bus_id: Option<String> = None;
+        for (idx, (is_main, mnode)) in mix_nodes.iter().enumerate() {
+            let track_inner = mnode.children().find(|n| n.has_tag_name("Track"));
+            let track_num_id = track_inner
+                .and_then(|t| child_text(t, "ID"))
+                .unwrap_or_else(|| (idx + 1).to_string());
+            let bus_id = format!("bus-{idx}");
+            if *is_main {
+                main_bus_id = Some(bus_id.clone());
+            }
+            if let Some(oid) = mnode.attribute("ObjectID") {
+                mix_obj_to_bus_id.insert(oid.to_string(), bus_id.clone());
+            }
+            if let Some(uid) = mnode.attribute("ObjectUID") {
+                mix_obj_to_bus_id.insert(uid.to_string(), bus_id.clone());
+            }
+            assign_num_to_bus_id.insert(track_num_id, bus_id);
+        }
+
+        // Map Inlet sources -> target bus_id (covers both AudioClipTrack ObjectURef and child SubMixTrack ObjectRef)
+        let mut submix_parent_from_inlet: HashMap<String, String> = HashMap::new();
+        for (idx, (_, mnode)) in mix_nodes.iter().enumerate() {
+            let target_bus_id = format!("bus-{idx}");
+            if let Some(inlet) = mnode
+                .children()
+                .find(|n| n.has_tag_name("Inlet"))
+                .and_then(|r| resolve_node(r, by_id, by_uid))
+            {
+                if let Some(sources) = inlet.children().find(|n| n.has_tag_name("Sources")) {
+                    for src in sources.children().filter(|n| n.has_tag_name("Source")) {
+                        if let Some(uref) = src.attribute("ObjectURef") {
+                            track_uid_to_bus_id.insert(uref.to_string(), target_bus_id.clone());
+                        }
+                        if let Some(oref) = src.attribute("ObjectRef") {
+                            if let Some(child_bus_id) = mix_obj_to_bus_id.get(oref) {
+                                submix_parent_from_inlet
+                                    .insert(child_bus_id.clone(), target_bus_id.clone());
+                            } else {
+                                track_uid_to_bus_id
+                                    .insert(oref.to_string(), target_bus_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build AudioBus list (only emit when there are submixes or a named main bus)
+        let has_submixes = mix_nodes.iter().any(|(is_main, _)| !*is_main);
+        let default_adaptive_ch = child_text(atg, "NumAdaptiveChannels")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&c| c > 0)
+            .unwrap_or(2);
+        let mut parsed_buses = Vec::with_capacity(mix_nodes.len());
+        let mut main_has_custom_name = false;
+        for (idx, (is_main, mnode)) in mix_nodes.iter().enumerate() {
+            let bus_id = format!("bus-{idx}");
+            let track_inner = mnode.children().find(|n| n.has_tag_name("Track"));
+            let raw_name = track_inner
+                .and_then(|t| nested_text(t, &["Node", "Properties", "MZ.TrackName"]))
+                .filter(|s| !s.trim().is_empty());
+            if *is_main && raw_name.is_some() {
+                main_has_custom_name = true;
+            }
+            let name = raw_name.unwrap_or_else(|| {
+                if *is_main {
+                    "Master".to_string()
+                } else {
+                    format!("Submix {idx}")
+                }
+            });
+            let audio_track = mnode.children().find(|n| n.has_tag_name("AudioTrack"));
+            let channels = match audio_track
+                .and_then(|at| child_text(at, "ChannelType"))
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                Some(0) => 1,
+                Some(1) | None => 2,
+                Some(2) => 6,
+                Some(3) => default_adaptive_ch,
+                Some(_) => 2,
+            };
+            let parent_bus_id = if *is_main {
+                None
+            } else {
+                audio_track
+                    .and_then(|at| child_text(at, "Assign"))
+                    .and_then(|a| assign_num_to_bus_id.get(a.trim()).cloned())
+                    .or_else(|| submix_parent_from_inlet.get(&bus_id).cloned())
+                    .or_else(|| main_bus_id.clone())
+                    .filter(|p| p != &bus_id)
+            };
+            parsed_buses.push(AudioBus {
+                id: bus_id,
+                name,
+                channels,
+                is_main: *is_main,
+                parent_bus_id,
+            });
+        }
+        if has_submixes || main_has_custom_name {
+            audio_buses = parsed_buses;
+        }
+
         if let Some(tracks_el) = find_descendant(atg, "Tracks") {
             for (idx, track_ref) in tracks_el
                 .children()
@@ -589,7 +1020,7 @@ fn parse_sequence(
                 let Some(track_el) = resolve_node(track_ref, by_id, by_uid) else {
                     continue;
                 };
-                let track = parse_track(
+                let mut track = parse_track(
                     track_el,
                     idx + 1,
                     TrackKind::Audio,
@@ -601,6 +1032,31 @@ fn parse_sequence(
                     link_map,
                     media_map,
                 );
+                let audio_track = track_el.children().find(|n| n.has_tag_name("AudioTrack"));
+                track.audio_channels = match audio_track
+                    .and_then(|at| child_text(at, "ChannelType"))
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                {
+                    Some(0) => 1,
+                    Some(1) | None => 2,
+                    Some(2) => 6,
+                    Some(3) => default_adaptive_ch,
+                    Some(_) => 2,
+                };
+                if !audio_buses.is_empty() {
+                    let assign_bus = audio_track
+                        .and_then(|at| child_text(at, "Assign"))
+                        .and_then(|a| assign_num_to_bus_id.get(a.trim()).cloned());
+                    let inlet_bus = track_el
+                        .attribute("ObjectUID")
+                        .and_then(|u| track_uid_to_bus_id.get(u).cloned())
+                        .or_else(|| {
+                            track_el
+                                .attribute("ObjectID")
+                                .and_then(|o| track_uid_to_bus_id.get(o).cloned())
+                        });
+                    track.output_bus_id = assign_bus.or(inlet_bus).or_else(|| main_bus_id.clone());
+                }
                 for c in &track.clips {
                     max_end = max_end.max(c.end_frame);
                 }
@@ -609,7 +1065,8 @@ fn parse_sequence(
         }
     }
 
-    let start_tc_frame = child_text(seq_node, "ZeroPoint")
+    let start_tc_frame = nested_text(seq_node, &["Node", "Properties", "MZ.ZeroPoint"])
+        .or_else(|| child_text(seq_node, "ZeroPoint"))
         .and_then(|s| s.trim().parse::<i64>().ok())
         .filter(|&t| t > 0)
         .map(|t| frame_rate.adobe_ticks_to_frames(t))
@@ -628,6 +1085,7 @@ fn parse_sequence(
         mark_out,
         video_tracks,
         audio_tracks,
+        audio_buses,
         markers,
         metadata: BTreeMap::new(),
     }
@@ -726,6 +1184,8 @@ fn parse_track(
         locked,
         muted,
         solo,
+        audio_channels: if kind == TrackKind::Audio { 2 } else { 0 },
+        output_bus_id: None,
         clips,
         transitions,
         markers: track_markers,
@@ -1044,6 +1504,8 @@ fn parse_clip(
                 audio_channels: 2,
                 audio_sample_rate: sample_rate,
                 color_space: None,
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
             });
     }
 
@@ -1299,6 +1761,26 @@ fn parse_motion_component(
                 if coords.len() >= 2 {
                     motion.anchor_x = coords[0] - 0.5;
                     motion.anchor_y = coords[1] - 0.5;
+                }
+            }
+            "8" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_left = v;
+                }
+            }
+            "9" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_top = v;
+                }
+            }
+            "10" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_right = v;
+                }
+            }
+            "11" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_bottom = v;
                 }
             }
             _ => {}

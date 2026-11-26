@@ -1,7 +1,8 @@
 use crate::binary::{
-    encode_protobuf, encode_utf16be, hex_decode, hex_encode, read_varint, write_varint, ProtoField,
+    decode_keyed_fields, decode_protobuf, decode_wrapper_bytes, encode_protobuf, encode_utf16be,
+    hex_decode, hex_encode, read_varint, write_varint, ProtoField, ProtoValue,
 };
-use nle_core::{ColorConfig, Marker, NleError, NleResult};
+use nle_core::{ColorConfig, Marker, MarkerScope, NleError, NleResult};
 use regex::Regex;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -29,6 +30,29 @@ pub fn premiere_label_to_resolve_color(preset_index: u8) -> Option<u32> {
     }
 }
 
+/// Resolve clip color enum (1..=16) -> Premiere Pro label preset index (0..=15).
+pub fn resolve_color_to_premiere_label(resolve_color: u32) -> Option<u8> {
+    match resolve_color {
+        1 => Some(13),
+        2 => Some(10),
+        3 => Some(9),
+        4 => Some(8),
+        5 => Some(3),
+        6 => Some(12),
+        7 => Some(14),
+        8 => Some(6),
+        9 => Some(5),
+        10 => Some(7),
+        11 => Some(2),
+        12 => Some(4),
+        13 => Some(1),
+        14 => Some(11),
+        15 => Some(0),
+        16 => Some(15),
+        _ => None,
+    }
+}
+
 fn marker_color_bits(color: &str) -> u64 {
     match color.to_ascii_lowercase().as_str() {
         "cyan" => 4,
@@ -48,6 +72,152 @@ fn marker_color_bits(color: &str) -> u64 {
         "cream" => 131072,
         _ => 2, // Blue default
     }
+}
+
+fn marker_color_from_bits(bits: u64) -> String {
+    match bits {
+        4 => "Cyan",
+        8 => "Green",
+        16 => "Yellow",
+        32 => "Red",
+        64 => "Pink",
+        128 => "Purple",
+        512 => "Fuchsia",
+        1024 => "Rose",
+        2048 => "Lavender",
+        4096 => "Sky",
+        8192 => "Mint",
+        16384 => "Lemon",
+        32768 => "Sand",
+        65536 => "Cocoa",
+        131072 => "Cream",
+        _ => "Blue",
+    }
+    .to_string()
+}
+
+/// Decode Resolve `Sm2SequenceLockableBlob` / `Sm2TiItemLockableBlob` `FieldsBlob` hex
+/// (supporting both `0x80` raw and `0x81` zstd) into `(markers, clip_color_enum)`.
+pub fn decode_lockable_blob(fields_blob_hex: &str, scope: MarkerScope) -> (Vec<Marker>, Option<u32>) {
+    let Ok(raw) = hex_decode(fields_blob_hex) else {
+        return (Vec::new(), None);
+    };
+    let Ok(entries) = decode_keyed_fields(&raw) else {
+        return (Vec::new(), None);
+    };
+    let Some(blob_data) = entries
+        .into_iter()
+        .find(|(k, _, _)| k == "BlobData")
+        .map(|(_, _, v)| v)
+    else {
+        return (Vec::new(), None);
+    };
+    let Ok(proto_bytes) = decode_wrapper_bytes(&blob_data) else {
+        return (Vec::new(), None);
+    };
+    let Ok(top_fields) = decode_protobuf(&proto_bytes) else {
+        return (Vec::new(), None);
+    };
+
+    let mut markers = Vec::new();
+    let mut clip_color: Option<u32> = None;
+
+    for f in top_fields {
+        match (f.number, f.value) {
+            (2, ProtoValue::Bytes(container_bytes)) => {
+                let Ok(c_fields) = decode_protobuf(&container_bytes) else {
+                    continue;
+                };
+                for cf in c_fields {
+                    if cf.number != 2 {
+                        continue;
+                    }
+                    let ProtoValue::Bytes(entry_bytes) = cf.value else {
+                        continue;
+                    };
+                    if let Some(m) = decode_marker_entry(&entry_bytes, scope) {
+                        markers.push(m);
+                    }
+                }
+            }
+            (5, ProtoValue::Varint(v)) => {
+                let c = (v / 2) as u32;
+                if c > 0 {
+                    clip_color = Some(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    markers.sort_by_key(|m| m.frame);
+    (markers, clip_color)
+}
+
+fn decode_marker_entry(entry_bytes: &[u8], scope: MarkerScope) -> Option<Marker> {
+    let fields = decode_protobuf(entry_bytes).ok()?;
+    let mut frame: Option<i64> = None;
+    let mut wrapped: Option<Vec<u8>> = None;
+
+    for f in fields {
+        match (f.number, f.value) {
+            (1, ProtoValue::Bytes(key_bytes)) => {
+                if let Ok(kfields) = decode_protobuf(&key_bytes) {
+                    for kf in kfields {
+                        if kf.number == 1 {
+                            if let ProtoValue::Varint(v) = kf.value {
+                                frame = Some((v / 2) as i64);
+                            }
+                        }
+                    }
+                }
+            }
+            (2, ProtoValue::Bytes(w)) => wrapped = Some(w),
+            _ => {}
+        }
+    }
+
+    let frame = frame?;
+    let wrapped = wrapped?;
+    if wrapped.len() < 8 {
+        return None;
+    }
+    // 8-byte header [ver: u32be][len: u32be] followed by protobuf field 1 marker body
+    let body_msg = decode_protobuf(&wrapped[8..]).ok()?;
+    let body_bytes = body_msg.into_iter().find_map(|f| match (f.number, f.value) {
+        (1, ProtoValue::Bytes(b)) => Some(b),
+        _ => None,
+    })?;
+    let body_fields = decode_protobuf(&body_bytes).ok()?;
+
+    let mut color = "Blue".to_string();
+    let mut strings: Vec<String> = Vec::new();
+    for bf in body_fields {
+        match (bf.number, bf.value) {
+            (1, ProtoValue::Varint(bits)) => color = marker_color_from_bits(bits),
+            (3, ProtoValue::Bytes(b)) => {
+                strings.push(String::from_utf8_lossy(&b).into_owned());
+            }
+            _ => {}
+        }
+    }
+
+    let comment = strings.first().cloned().unwrap_or_default();
+    let duration_frames = strings
+        .get(1)
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let name = strings.get(2).cloned().unwrap_or_default();
+
+    Some(Marker {
+        frame,
+        duration_frames,
+        name,
+        comment,
+        color,
+        scope,
+    })
 }
 
 fn length_field(field_num: u32, bytes: &[u8]) -> Vec<u8> {
@@ -171,6 +341,245 @@ pub fn clip_color_lockable_blob_xml(clip_db_id: &str, resolve_color: u32) -> Str
     format!(
         "<Element><Sm2TiItemLockableBlob DbId=\"{blob_id}\"><FieldsBlob>{hex}</FieldsBlob><BlobOwner>{clip_db_id}</BlobOwner><DbSavedTime>0</DbSavedTime></Sm2TiItemLockableBlob></Element>"
     )
+}
+
+/// Resolve standard MediaPoolItem metadata enum IDs (verified in Resolve Studio 21.2).
+pub fn resolve_meta_enum_to_name(enum_id: u64) -> Option<&'static str> {
+    match enum_id {
+        64 => Some("Description"),
+        65 => Some("Comments"),
+        66 => Some("Scene"),
+        67 => Some("Shot"),
+        68 => Some("Take"),
+        69 => Some("Angle"),
+        74 => Some("Keywords"),
+        78 => Some("Shoot Day"),
+        80 => Some("Camera #"),
+        88 => Some("Location"),
+        96 => Some("Camera Manufacturer"),
+        97 => Some("Camera Type"),
+        100 => Some("Camera Notes"),
+        107 => Some("ISO"),
+        115 => Some("LUT Used"),
+        116 => Some("Lens Type"),
+        211 => Some("Audio Notes"),
+        304 => Some("Production Name"),
+        336 => Some("Director"),
+        _ => None,
+    }
+}
+
+/// Map canonical clip metadata field name to Resolve's `BtMetadataLockableBlob` enum ID.
+pub fn name_to_resolve_meta_enum(name: &str) -> Option<u64> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "description" => Some(64),
+        "comments" | "comment" => Some(65),
+        "scene" => Some(66),
+        "shot" => Some(67),
+        "take" => Some(68),
+        "angle" => Some(69),
+        "keywords" | "keyword" => Some(74),
+        "shoot day" => Some(78),
+        "camera #" | "camera" => Some(80),
+        "location" => Some(88),
+        "camera manufacturer" => Some(96),
+        "camera type" => Some(97),
+        "camera notes" => Some(100),
+        "iso" => Some(107),
+        "lut used" => Some(115),
+        "lens type" => Some(116),
+        "audio notes" => Some(211),
+        "production name" => Some(304),
+        "director" => Some(336),
+        _ => None,
+    }
+}
+
+/// Encode Resolve 21.2 `BtMetadataLockableBlob` XML for a Media Pool clip's standard metadata
+/// (`f2` enum entries) and third-party/custom metadata (`f4` string key-value entries).
+/// `info_db_id` must be the `DbId` of the clip's `<BtVideoInfo>` (or `<BtAudioInfo>` for audio-only).
+pub fn media_metadata_lockable_blob_xml(
+    info_db_id: &str,
+    std_meta: &BTreeMap<String, String>,
+    custom_meta: &BTreeMap<String, String>,
+) -> Option<String> {
+    if info_db_id.is_empty() || (std_meta.is_empty() && custom_meta.is_empty()) {
+        return None;
+    }
+
+    let mut std_by_enum: BTreeMap<u64, String> = BTreeMap::new();
+    let mut extra_third_party: BTreeMap<String, String> = custom_meta.clone();
+
+    for (k, v) in std_meta {
+        if v.is_empty() {
+            continue;
+        }
+        if let Some(eid) = name_to_resolve_meta_enum(k) {
+            std_by_enum.entry(eid).or_insert_with(|| v.clone());
+        } else if k.eq_ignore_ascii_case("log note") && !std_by_enum.contains_key(&65) {
+            std_by_enum.insert(65, v.clone());
+        } else if k.eq_ignore_ascii_case("tape name") {
+            // Native Resolve MAM/Premiere interop convention for tape/reel name in ThirdPartyMetadata.
+            extra_third_party
+                .entry("Column.Intrinsic.TapeName".to_string())
+                .or_insert_with(|| v.clone());
+        } else {
+            // Preserve unmapped file metadata fields in ThirdPartyMetadata so nothing is lost.
+            extra_third_party.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    if std_by_enum.is_empty() && extra_third_party.is_empty() {
+        return None;
+    }
+
+    let mut inner = Vec::new();
+    for (eid, val) in &std_by_enum {
+        let entry = encode_protobuf(&[
+            ProtoField::varint(1, *eid),
+            ProtoField::bytes(2, val.as_bytes().to_vec()),
+        ]);
+        inner.extend_from_slice(&length_field(2, &entry));
+    }
+    for (k, v) in &extra_third_party {
+        if k.is_empty() {
+            continue;
+        }
+        let entry = encode_protobuf(&[
+            ProtoField::bytes(1, k.as_bytes().to_vec()),
+            ProtoField::bytes(2, v.as_bytes().to_vec()),
+        ]);
+        inner.extend_from_slice(&length_field(4, &entry));
+    }
+
+    // 8-byte BtMetadata header: [1_000_001 (0x000f4241): u32be][inner_len: u32be]
+    let mut wrapped_inner = Vec::with_capacity(8 + inner.len());
+    wrapped_inner.extend_from_slice(&1_000_001u32.to_be_bytes());
+    wrapped_inner.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+    wrapped_inner.extend_from_slice(&inner);
+
+    let proto = length_field(2, &wrapped_inner);
+    let mut blob_data = Vec::with_capacity(9 + proto.len());
+    blob_data.extend_from_slice(&10001u32.to_be_bytes());
+    blob_data.extend_from_slice(&((proto.len() + 1) as u32).to_be_bytes());
+    blob_data.push(0x80);
+    blob_data.extend_from_slice(&proto);
+
+    let key = encode_utf16be("BlobData");
+    let mut fields_blob = Vec::new();
+    fields_blob.extend_from_slice(&1u32.to_be_bytes());
+    fields_blob.extend_from_slice(&1u32.to_be_bytes());
+    fields_blob.extend_from_slice(&(key.len() as u32).to_be_bytes());
+    fields_blob.extend_from_slice(&key);
+    fields_blob.extend_from_slice(&12u32.to_be_bytes());
+    fields_blob.push(0);
+    fields_blob.extend_from_slice(&(blob_data.len() as u32).to_be_bytes());
+    fields_blob.extend_from_slice(&blob_data);
+
+    let hex = hex_encode(&fields_blob);
+    let blob_id = Uuid::new_v4();
+    Some(format!(
+        "<Element><BtMetadataLockableBlob DbId=\"{blob_id}\"><FieldsBlob>{hex}</FieldsBlob><BlobOwner>{info_db_id}</BlobOwner><DbSavedTime>0</DbSavedTime></BtMetadataLockableBlob></Element>"
+    ))
+}
+
+/// Decode Resolve `BtMetadataLockableBlob` `FieldsBlob` hex (`0x80` raw or `0x81` zstd)
+/// into `(standard_metadata, third_party_custom_metadata)`.
+pub fn decode_media_metadata_blob(
+    fields_blob_hex: &str,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut std_meta = BTreeMap::new();
+    let mut custom_meta = BTreeMap::new();
+
+    let Ok(raw) = hex_decode(fields_blob_hex) else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(entries) = decode_keyed_fields(&raw) else {
+        return (std_meta, custom_meta);
+    };
+    let Some(blob_data) = entries
+        .into_iter()
+        .find(|(k, _, _)| k == "BlobData")
+        .map(|(_, _, v)| v)
+    else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(proto_bytes) = decode_wrapper_bytes(&blob_data) else {
+        return (std_meta, custom_meta);
+    };
+    let Ok(top_fields) = decode_protobuf(&proto_bytes) else {
+        return (std_meta, custom_meta);
+    };
+
+    for f in top_fields {
+        if f.number != 2 {
+            continue;
+        }
+        let ProtoValue::Bytes(wrapped) = f.value else {
+            continue;
+        };
+        if wrapped.len() < 8 {
+            continue;
+        }
+        let Ok(inner_fields) = decode_protobuf(&wrapped[8..]) else {
+            continue;
+        };
+        for inf in inner_fields {
+            match (inf.number, inf.value) {
+                (2, ProtoValue::Bytes(entry_bytes)) => {
+                    if let Ok(sub) = decode_protobuf(&entry_bytes) {
+                        let mut eid: Option<u64> = None;
+                        let mut val: Option<String> = None;
+                        for sf in sub {
+                            match (sf.number, sf.value) {
+                                (1, ProtoValue::Varint(v)) => eid = Some(v),
+                                (2, ProtoValue::Bytes(b)) => {
+                                    val = Some(String::from_utf8_lossy(&b).into_owned());
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let (Some(id), Some(v)) = (eid, val) {
+                            if !v.is_empty() {
+                                if let Some(name) = resolve_meta_enum_to_name(id) {
+                                    std_meta.insert(name.to_string(), v);
+                                }
+                            }
+                        }
+                    }
+                }
+                (4, ProtoValue::Bytes(entry_bytes)) => {
+                    if let Ok(sub) = decode_protobuf(&entry_bytes) {
+                        let mut k: Option<String> = None;
+                        let mut v: Option<String> = None;
+                        for sf in sub {
+                            if let ProtoValue::Bytes(b) = sf.value {
+                                match sf.number {
+                                    1 => k = Some(String::from_utf8_lossy(&b).into_owned()),
+                                    2 => v = Some(String::from_utf8_lossy(&b).into_owned()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let (Some(key), Some(val)) = (k, v) {
+                            if !key.is_empty() {
+                                if key == "Column.Intrinsic.TapeName" {
+                                    if !val.is_empty() {
+                                        std_meta.entry("Tape Name".to_string()).or_insert(val);
+                                    }
+                                } else {
+                                    custom_meta.insert(key, val);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (std_meta, custom_meta)
 }
 
 pub fn append_lockable_blob(project_xml: &str, blob_xml: &str) -> NleResult<String> {

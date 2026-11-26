@@ -564,6 +564,7 @@ fn parse_sequence(
     Sequence {
         id,
         name,
+        kind: nle_core::SequenceKind::Timeline,
         width,
         height,
         frame_rate,
@@ -1122,6 +1123,8 @@ fn parse_clip(
         media_id: resolved_media_id,
         media_path,
         media_kind,
+        source_kind: nle_core::ClipSourceKind::Media,
+        active_angle: None,
         start_frame,
         end_frame,
         source_in_frame,

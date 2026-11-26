@@ -51,6 +51,7 @@ mod tests {
             sequences: vec![Sequence {
                 id: "seq-1".into(),
                 name: "Edit_01".into(),
+                kind: SequenceKind::Timeline,
                 width: 1920,
                 height: 1080,
                 frame_rate: Rational::FPS_25,
@@ -72,6 +73,8 @@ mod tests {
                         media_id: "m1".into(),
                         media_path: "/Media/A001.mov".into(),
                         media_kind: MediaKind::Video,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
                         start_frame: 0,
                         end_frame: 150,
                         source_in_frame: 25,
@@ -122,6 +125,8 @@ mod tests {
                         media_id: "m1".into(),
                         media_path: "/Media/A001.mov".into(),
                         media_kind: MediaKind::Audio,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
                         start_frame: 0,
                         end_frame: 150,
                         source_in_frame: 25,
@@ -192,6 +197,7 @@ mod tests {
             sequences: vec![Sequence {
                 id: "seq-tc".into(),
                 name: "Timeline 1".into(),
+                kind: SequenceKind::Timeline,
                 width: 3840,
                 height: 2160,
                 frame_rate: Rational::FPS_24,
@@ -213,6 +219,8 @@ mod tests {
                         media_id: "m1".into(),
                         media_path: "/Media/ShotA.mp4".into(),
                         media_kind: MediaKind::Video,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
                         start_frame: 0,
                         end_frame: 200,
                         source_in_frame: 10,
@@ -318,5 +326,48 @@ mod tests {
         assert_eq!(u64::from_be_bytes(setup[40..48].try_into().unwrap()), 1080);
         assert_eq!(u64::from_be_bytes(setup[48..56].try_into().unwrap()), 1920);
         assert_eq!(u64::from_be_bytes(setup[76..84].try_into().unwrap()), 25);
+    }
+
+    #[test]
+    fn timemap_encodes_and_decodes_forward_reverse_and_freeze() {
+        let id_hex = timemap::build_media_timemap(250, 25.0, 100.0, false);
+        assert_eq!(timemap::decode_media_timemap(&id_hex), Some((100.0, false)));
+
+        let slow_hex = timemap::build_media_timemap(250, 25.0, 50.0, false);
+        let (spd, rev) = timemap::decode_media_timemap(&slow_hex).expect("decode 50%");
+        assert!((spd - 50.0).abs() < 1e-4);
+        assert!(!rev);
+
+        let fast_hex = timemap::build_media_timemap(250, 25.0, 200.0, true);
+        let (spd, rev) = timemap::decode_media_timemap(&fast_hex).expect("decode 200%");
+        assert!((spd - 200.0).abs() < 1e-4);
+        assert!(!rev);
+
+        let rev_hex = timemap::build_media_timemap(250, 25.0, -100.0, false);
+        let (spd, rev) = timemap::decode_media_timemap(&rev_hex).expect("decode -100%");
+        assert!((spd - (-100.0)).abs() < 1e-4);
+        assert!(rev);
+
+        let freeze_hex = timemap::build_media_timemap(250, 25.0, 0.0, false);
+        let (spd, rev) = timemap::decode_media_timemap(&freeze_hex).expect("decode 0%");
+        assert!(spd.abs() < 1e-6);
+        assert!(!rev);
+    }
+
+    #[test]
+    fn decodes_resolve21_zstd_0x81_envelope() {
+        // Minimal valid zstd frame (uncompressed block) containing "Camera 3" (8 bytes):
+        // magic: 28 b5 2f fd, fhd: 20 (single segment, 1B fcs), fcs: 08, block header: 01 00 00 -> raw block len 8, last=1: (8<<3)|1 = 0x41 00 00
+        let mut zstd_frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x08, 0x41, 0x00, 0x00];
+        zstd_frame.extend_from_slice(b"Camera 3");
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&2u32.to_be_bytes());
+        envelope.extend_from_slice(&((zstd_frame.len() + 1) as u32).to_be_bytes());
+        envelope.push(0x81);
+        envelope.extend_from_slice(&zstd_frame);
+
+        let decoded = binary::decode_wrapper_hex(&binary::hex_encode(&envelope))
+            .expect("decode 0x81 zstd envelope");
+        assert_eq!(decoded, b"Camera 3");
     }
 }

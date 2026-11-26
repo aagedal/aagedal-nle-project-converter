@@ -255,10 +255,15 @@ pub fn write_drp_file(
                     .max(clip.duration_frames())
                     .max(2);
 
+                let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
+                    -clip.speed_percent
+                } else {
+                    clip.speed_percent
+                };
                 let timemap = if clip.media_kind == MediaKind::Image {
                     build_still_timemap()
                 } else {
-                    build_media_timemap(asset_dur, src_fps, clip.speed_percent, false)
+                    build_media_timemap(asset_dur, src_fps, signed_speed, false)
                 };
                 node = set_child_text(&node, "MediaTimemapBA", &timemap);
 
@@ -370,7 +375,12 @@ pub fn write_drp_file(
                     .max(clip.source_out_frame)
                     .max(clip.duration_frames())
                     .max(2);
-                let timemap = build_media_timemap(asset_dur, src_fps, clip.speed_percent, true);
+                let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
+                    -clip.speed_percent
+                } else {
+                    clip.speed_percent
+                };
+                let timemap = build_media_timemap(asset_dur, src_fps, signed_speed, true);
                 node = set_child_text(&node, "MediaTimemapBA", &timemap);
                 node = set_child_text(&node, "EffectFiltersBA", "");
 

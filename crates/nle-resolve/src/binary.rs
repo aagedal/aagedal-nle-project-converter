@@ -1,5 +1,6 @@
 use nle_core::{NleError, NleResult};
 use std::collections::BTreeMap;
+use std::io::Read;
 
 /// Encode bytes as lowercase hex string.
 pub fn hex_encode(bytes: &[u8]) -> String {
@@ -190,13 +191,28 @@ pub fn encode_protobuf(fields: &[ProtoField]) -> Vec<u8> {
     out
 }
 
-/// Unwrap Resolve's 9-byte `0x80` uncompressed envelope (`[version: u32be][len: u32be][0x80][payload...]`).
+/// Unwrap Resolve's 9-byte envelope (`[version: u32be][len: u32be][flag][payload...]`).
+/// Supports both `0x80` (uncompressed protobuf) and `0x81` (Resolve 21.2 zstd-compressed protobuf).
 pub fn decode_wrapper_hex(hex: &str) -> NleResult<Vec<u8>> {
     let raw = hex_decode(hex)?;
-    if raw.len() < 9 || raw[8] != 0x80 {
-        return Err(NleError::InvalidFormat("Resolve blob does not have uncompressed 0x80 envelope".into()));
+    if raw.len() < 9 {
+        return Err(NleError::InvalidFormat("Resolve blob envelope too short".into()));
     }
-    Ok(raw[9..].to_vec())
+    match raw[8] {
+        0x80 => Ok(raw[9..].to_vec()),
+        0x81 => {
+            let mut decoder = ruzstd::StreamingDecoder::new(&raw[9..])
+                .map_err(|e| NleError::Archive(format!("Resolve 0x81 zstd init failed: {e}")))?;
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| NleError::Archive(format!("Resolve 0x81 zstd decode failed: {e}")))?;
+            Ok(out)
+        }
+        flag => Err(NleError::InvalidFormat(format!(
+            "Unsupported Resolve blob envelope flag 0x{flag:02x}"
+        ))),
+    }
 }
 
 /// Wrap raw protobuf bytes into Resolve's version-2 `0x80` hex envelope.

@@ -1,8 +1,12 @@
-use crate::binary::{decode_keyed_fields, decode_protobuf, decode_wrapper_hex, hex_decode, ProtoValue};
+use crate::binary::{
+    decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
+    ProtoValue,
+};
+use crate::timemap::decode_media_timemap;
 use nle_core::{
-    frames_to_timecode, Clip, ColorConfig, MediaAsset, MediaKind, MotionTransform, NleError,
-    NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, Track,
-    TrackKind, Transition,
+    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, MediaAsset, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
+    SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -55,6 +59,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
 
     struct SeqMeta {
         name: String,
+        kind: SequenceKind,
         width: u32,
         height: u32,
         fps: Rational,
@@ -62,6 +67,9 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
     }
 
     let mut seq_meta_by_id: HashMap<String, SeqMeta> = HashMap::new();
+    // Maps MediaPoolItem DbId -> (ClipSourceKind, inner Sm2Sequence DbId) for nested timelines,
+    // compound clips, and multicam clips.
+    let mut mp_container_by_id: HashMap<String, (ClipSourceKind, String)> = HashMap::new();
     let mut bins: Vec<ProjectBin> = Vec::new();
     let mut media_assets: BTreeMap<String, MediaAsset> = BTreeMap::new();
 
@@ -83,8 +91,27 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
 
         for node in root.descendants().filter(|n| n.is_element()) {
             match node.tag_name().name() {
-                "Sm2MpTimelineClip" => {
-                    let tl_name = child_text(node, "Name").unwrap_or_else(|| "Timeline".to_string());
+                "Sm2MpTimelineClip" | "Sm2MpCompoundClip" | "Sm2MpMulticamClip" => {
+                    let mp_db_id = node.attribute("DbId").unwrap_or("").to_string();
+                    let (seq_kind, clip_source_kind, default_name) = match node.tag_name().name() {
+                        "Sm2MpCompoundClip" => (
+                            SequenceKind::CompoundClip,
+                            ClipSourceKind::CompoundClip,
+                            "Compound Clip",
+                        ),
+                        "Sm2MpMulticamClip" => (
+                            SequenceKind::MulticamClip,
+                            ClipSourceKind::MulticamClip,
+                            "Multicam Clip",
+                        ),
+                        _ => (
+                            SequenceKind::Timeline,
+                            ClipSourceKind::NestedSequence,
+                            "Timeline",
+                        ),
+                    };
+                    let tl_name =
+                        child_text(node, "Name").unwrap_or_else(|| default_name.to_string());
                     if let Some(seq_el) = node.descendants().find(|n| n.has_tag_name("Sm2Sequence")) {
                         let seq_id = seq_el.attribute("DbId").unwrap_or("").to_string();
                         let fps = child_text(seq_el, "FrameRate")
@@ -99,11 +126,16 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                             .unwrap_or(0)
                             .max(0);
                         if !seq_id.is_empty() {
+                            if !mp_db_id.is_empty() {
+                                mp_container_by_id
+                                    .insert(mp_db_id, (clip_source_kind, seq_id.clone()));
+                            }
                             bin_seq_ids.push(seq_id.clone());
                             seq_meta_by_id.insert(
                                 seq_id,
                                 SeqMeta {
                                     name: tl_name,
+                                    kind: seq_kind,
                                     width,
                                     height,
                                     fps,
@@ -212,6 +244,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         let seq_name = meta
             .map(|m| m.name.clone())
             .unwrap_or_else(|| format!("Timeline {}", sequences.len() + 1));
+        let seq_kind = meta.map(|m| m.kind).unwrap_or(SequenceKind::Timeline);
         let width = meta.map(|m| m.width).unwrap_or(1920);
         let height = meta.map(|m| m.height).unwrap_or(1080);
         let fps = meta.map(|m| m.fps).unwrap_or(Rational::FPS_25);
@@ -225,6 +258,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             height,
             fps,
             start_tc_frame,
+            &mp_container_by_id,
             &mut media_assets,
         );
         let audio_tracks = parse_resolve_tracks(
@@ -235,6 +269,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             height,
             fps,
             start_tc_frame,
+            &mp_container_by_id,
             &mut media_assets,
         );
 
@@ -249,6 +284,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         sequences.push(Sequence {
             id: seq_id,
             name: seq_name,
+            kind: seq_kind,
             width,
             height,
             frame_rate: fps,
@@ -285,6 +321,7 @@ fn parse_resolve_tracks(
     height: u32,
     seq_fps: Rational,
     start_tc_frame: i64,
+    mp_container_by_id: &HashMap<String, (ClipSourceKind, String)>,
     media_assets: &mut BTreeMap<String, MediaAsset>,
 ) -> Vec<Track> {
     let Some(vec_el) = root.children().find(|n| n.has_tag_name(vec_tag)) else {
@@ -375,6 +412,24 @@ fn parse_resolve_tracks(
                     .filter(|&c| c > 0)
                     .unwrap_or(1);
 
+                let clip_db_id = cnode.attribute("DbId").unwrap_or("").to_string();
+                let (source_kind, resolved_media_id) = match mp_container_by_id.get(&media_id) {
+                    Some((sk, inner_seq_id)) => (*sk, inner_seq_id.clone()),
+                    None => (ClipSourceKind::Media, media_id.clone()),
+                };
+
+                let (speed_percent, reversed) = child_text(cnode, "MediaTimemapBA")
+                    .and_then(|h| decode_media_timemap(&h))
+                    .unwrap_or((100.0, false));
+
+                let (active_angle, link_group_id) = child_text(cnode, "FieldsBlob")
+                    .map(|h| decode_clip_fields_blob(&h, &clip_db_id))
+                    .unwrap_or((None, None));
+
+                let (motion, opacity) = child_text(cnode, "EffectFiltersBA")
+                    .map(|h| decode_effect_filters(&h))
+                    .unwrap_or_else(|| (MotionTransform::default(), 100.0));
+
                 // Backfill MediaAsset full path when Resolve 21.2 zstd-compressed BtVideoInfo/Clip
                 // could not be unpacked directly from MpFolder.xml.
                 let mut clip_w = width;
@@ -392,15 +447,17 @@ fn parse_resolve_tracks(
                 }
 
                 clips.push(Clip {
-                    id: cnode.attribute("DbId").unwrap_or("").to_string(),
+                    id: clip_db_id,
                     name: cname,
-                    media_id,
+                    media_id: resolved_media_id,
                     media_path,
                     media_kind: if kind == TrackKind::Video {
                         MediaKind::Video
                     } else {
                         MediaKind::Audio
                     },
+                    source_kind,
+                    active_angle,
                     start_frame: start,
                     end_frame: start + dur,
                     source_in_frame: in_frame,
@@ -410,15 +467,15 @@ fn parse_resolve_tracks(
                     source_fps: clip_fps,
                     source_width: clip_w,
                     source_height: clip_h,
-                    speed_percent: 100.0,
-                    reversed: false,
+                    speed_percent,
+                    reversed,
                     enabled: true,
                     audio_channel,
-                    link_group_id: None,
+                    link_group_id,
                     label_name: None,
                     label_preset_index: None,
-                    motion: MotionTransform::default(),
-                    opacity: 100.0,
+                    motion,
+                    opacity,
                     lumetri_effects: Vec::new(),
                     effects: Vec::new(),
                     markers: Vec::new(),
@@ -569,4 +626,186 @@ fn decode_bt_clip_path(hex: &str) -> Option<String> {
     } else {
         Some(format!("{}/{}", dir.trim_end_matches(['/', '\\']), file))
     }
+}
+
+/// Decode Resolve 21.2 clip `<FieldsBlob>` (supports `0x80` and `0x81` zstd) for:
+/// - `active_angle` (UTF-8 camera/angle name at `f1.f3`, e.g. `"Camera 3"`)
+/// - `link_group_id` (canonical group ID computed from `f1.f1.f1` keyed-dict of linked sibling DbIds)
+fn decode_clip_fields_blob(hex: &str, self_db_id: &str) -> (Option<String>, Option<String>) {
+    let Ok(raw) = decode_wrapper_hex(hex) else {
+        return (None, None);
+    };
+    let Ok(outer) = decode_protobuf(&raw) else {
+        return (None, None);
+    };
+    let mut active_angle: Option<String> = None;
+    let mut linked_ids: Vec<String> = Vec::new();
+
+    for f in outer {
+        if f.number == 1 {
+            if let ProtoValue::Bytes(f1_bytes) = f.value {
+                if let Ok(inner) = decode_protobuf(&f1_bytes) {
+                    for sf in inner {
+                        match (sf.number, sf.value) {
+                            (1, ProtoValue::Bytes(f11_bytes)) => {
+                                if let Ok(sub) = decode_protobuf(&f11_bytes) {
+                                    for ssf in sub {
+                                        if ssf.number == 1 {
+                                            if let ProtoValue::Bytes(dict_bytes) = ssf.value {
+                                                if let Ok(entries) = decode_keyed_fields(&dict_bytes) {
+                                                    for (_, kind, val) in entries {
+                                                        if kind == 10 {
+                                                            if let Ok(id) = decode_utf16be(&val) {
+                                                                let id = id.trim().to_string();
+                                                                if !id.is_empty() {
+                                                                    linked_ids.push(id);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            (3, ProtoValue::Bytes(angle_bytes)) => {
+                                if let Ok(s) = String::from_utf8(angle_bytes) {
+                                    let trimmed = s.trim();
+                                    if !trimmed.is_empty() {
+                                        active_angle = Some(trimmed.to_string());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let link_group_id = if !linked_ids.is_empty() {
+        if !self_db_id.is_empty() {
+            linked_ids.push(self_db_id.to_string());
+        }
+        linked_ids.sort();
+        linked_ids.dedup();
+        linked_ids.first().map(|min_id| format!("resolve-link-{min_id}"))
+    } else {
+        None
+    };
+
+    (active_angle, link_group_id)
+}
+
+/// Decode Resolve `<EffectFiltersBA>` (`0x80` or `0x81` zstd) into `MotionTransform` + `opacity`.
+fn decode_effect_filters(hex: &str) -> (MotionTransform, f64) {
+    let mut motion = MotionTransform::default();
+    let mut opacity = 100.0_f64;
+
+    let Ok(raw) = decode_wrapper_hex(hex) else {
+        return (motion, opacity);
+    };
+    let Ok(outer) = decode_protobuf(&raw) else {
+        return (motion, opacity);
+    };
+
+    let mut zoom_x: Option<f64> = None;
+    let mut zoom_y: Option<f64> = None;
+
+    for f in outer {
+        if f.number != 1 {
+            continue;
+        }
+        let ProtoValue::Bytes(filter_bytes) = f.value else {
+            continue;
+        };
+        let Ok(filter_fields) = decode_protobuf(&filter_bytes) else {
+            continue;
+        };
+        let filter_id = filter_fields.iter().find_map(|ff| match (ff.number, &ff.value) {
+            (1, ProtoValue::Varint(v)) => Some(*v),
+            _ => None,
+        });
+        let Some(filter_id) = filter_id else {
+            continue;
+        };
+
+        for ff in &filter_fields {
+            if ff.number != 9 {
+                continue;
+            }
+            let ProtoValue::Bytes(param_bytes) = &ff.value else {
+                continue;
+            };
+            if param_bytes.is_empty() {
+                continue;
+            }
+            let Ok(pfields) = decode_protobuf(param_bytes) else {
+                continue;
+            };
+            let pid = pfields.iter().find_map(|pf| match (pf.number, &pf.value) {
+                (1, ProtoValue::Varint(v)) => Some(*v),
+                _ => None,
+            });
+            let Some(pid) = pid else {
+                continue;
+            };
+            let curve_bytes = pfields.iter().find_map(|pf| match (pf.number, &pf.value) {
+                (3, ProtoValue::Bytes(b)) => Some(b.as_slice()),
+                _ => None,
+            });
+            let Some(curve_bytes) = curve_bytes else {
+                continue;
+            };
+            let Ok(curve_fields) = decode_protobuf(curve_bytes) else {
+                continue;
+            };
+            let kf_count = curve_fields.iter().filter(|cf| cf.number == 1).count();
+            if kf_count > 1 && filter_id == 4 {
+                motion.has_keyframes = true;
+            }
+            let first_val = curve_fields.iter().find_map(|cf| {
+                if cf.number != 1 {
+                    return None;
+                }
+                let ProtoValue::Bytes(kf_bytes) = &cf.value else {
+                    return None;
+                };
+                let kf_sub = decode_protobuf(kf_bytes).ok()?;
+                kf_sub.iter().find_map(|k| match (k.number, &k.value) {
+                    (2, ProtoValue::Fixed64(arr)) => Some(f64::from_le_bytes(*arr)),
+                    _ => None,
+                })
+            });
+            let Some(val) = first_val.filter(|v| v.is_finite()) else {
+                continue;
+            };
+            match (filter_id, pid) {
+                (4, 42) => zoom_x = Some(val),
+                (4, 43) => zoom_y = Some(val),
+                (4, 40) => motion.position_x = val,
+                (4, 41) => motion.position_y = val,
+                (4, 47) => motion.rotation = -val,
+                (6, 54) => motion.crop_left = val * 100.0,
+                (6, 55) => motion.crop_right = val * 100.0,
+                (6, 56) => motion.crop_top = val * 100.0,
+                (6, 57) => motion.crop_bottom = val * 100.0,
+                (2, 1) => opacity = val,
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(zx) = zoom_x {
+        motion.scale = zx * 100.0;
+        if let Some(zy) = zoom_y {
+            if (zx - zy).abs() > 1e-4 {
+                motion.scale_y = Some(zy * 100.0);
+            }
+        }
+    }
+
+    (motion, opacity)
 }

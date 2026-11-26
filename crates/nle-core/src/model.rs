@@ -94,6 +94,25 @@ pub enum EffectCategory {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SequenceKind {
+    #[default]
+    Timeline,
+    CompoundClip,
+    MulticamClip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipSourceKind {
+    #[default]
+    Media,
+    NestedSequence,
+    CompoundClip,
+    MulticamClip,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerScope {
@@ -168,6 +187,8 @@ pub struct MediaAsset {
 pub struct Sequence {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: SequenceKind,
     pub width: u32,
     pub height: u32,
     pub frame_rate: Rational,
@@ -224,6 +245,11 @@ pub struct Clip {
     pub media_id: String,
     pub media_path: String,
     pub media_kind: MediaKind,
+    #[serde(default)]
+    pub source_kind: ClipSourceKind,
+    /// Active multicam camera/angle name or ID when `source_kind == ClipSourceKind::MulticamClip`.
+    #[serde(default)]
+    pub active_angle: Option<String>,
     pub start_frame: i64,
     pub end_frame: i64,
     pub source_in_frame: i64,

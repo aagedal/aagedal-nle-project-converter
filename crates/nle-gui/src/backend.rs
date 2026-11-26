@@ -31,8 +31,10 @@ pub fn load_project_from_disk(path: &Path) -> Result<Project, String> {
     match ext.as_str() {
         "prproj" => nle_premiere::read_prproj_file(path).map_err(|e| e.to_string()),
         "drp" | "drt" => nle_resolve::read_drp_file(path).map_err(|e| e.to_string()),
+        "fcpxml" | "fcpxmld" => nle_interchange::read_fcpxml_file(path).map_err(|e| e.to_string()),
+        "fcpbundle" => nle_interchange::read_fcpbundle_file(path).map_err(|e| e.to_string()),
         _ => Err(format!(
-            "Unsupported project file '.{ext}'. Supported inputs: .prproj (Premiere Pro), .drp (DaVinci Resolve)."
+            "Unsupported project file '.{ext}'. Supported inputs: .prproj (Premiere Pro), .drp/.drt (DaVinci Resolve), .fcpbundle/.fcpxml/.fcpxmld (Final Cut Pro)."
         )),
     }
 }

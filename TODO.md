@@ -22,10 +22,11 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Schema documented in [docs/PREMIERE_2026_SCHEMA.md](docs/PREMIERE_2026_SCHEMA.md) alongside live Resolve → Premiere FCP7 XML and native `.drp → .prproj` import findings.
   - Verified native `.drp → .prproj` writer live in Premiere Pro 2026 (`Resolve21_Corpus.drp` & `05_Respeed_And_ClipAttributes.drt`: all 7+1 sequences, bins, `MZ.ZeroPoint` 01:00:00:00, sequence markers, `<Link>` groups, `AE.ADBE Motion` / `AE.ADBE Opacity`, Cross Dissolve / Constant Power transitions, nested timelines, compound clips, native 3-angle `<IsMulticam>` cuts, `50%`/`200%`/`-100%`/freeze retiming, and clean Premiere re-save).
 
-- [ ] **Final Cut Pro live test project** *(Priority #3 & #4)*
-  - Export real timelines from Final Cut Pro (`.fcpxml` / `.fcpxmld`) with connected clips, secondary storylines, compound clips, multicam clips, titles, transitions, retiming, and markers.
-  - Add native `.fcpxml` / `.fcpxmld` reader support to enable full `Final Cut Pro → DaVinci Resolve (.drp)` and `Final Cut Pro → Premiere / OTIO / FCP7 XML` conversion.
-  - Verify `.prproj → .fcpxml` and `.drp → .fcpxml` import cleanly into Final Cut Pro with connected video lanes (`V2+`), audio lanes, transitions, and accurate `tcStart`.
+- [x] **Final Cut Pro basic support (`.fcpxml` / `.fcpxmld` & native `.fcpbundle`)** *(Priority #3 & #4)*
+  - Added pure-Rust FCPXML 1.8–1.15 / `.fcpxmld` bundle reader (`crates/nle-interchange/src/fcpxml/reader.rs`) and native `.fcpbundle` CoreData SQLite + `NSKeyedArchiver` binary plist reader (`crates/nle-interchange/src/fcpbundle/`), enabling `Final Cut Pro → DaVinci Resolve (.drp)` and `Final Cut Pro → Premiere Pro (.prproj)` / OTIO / FCP7 XML conversion in both CLI and GPUI GUI.
+  - Upgraded FCPXML 1.11 writer (`crates/nle-interchange/src/fcpxml/writer.rs`) with per-asset/per-sequence `<format>` resources, accurate `tcStart` & source TC `start`, connected video (`V2+`) and audio lanes with linked-audio deduplication, `<transition>` elements, `<adjust-transform>` / `<adjust-crop>` / `<adjust-blend>`, `<timeMap>` retiming, `<ref-clip>` compound clips, `<mc-clip>` multicam clips, and gap/clip markers.
+  - Verified against real Final Cut Pro 11 `.fcpbundle` and `.fcpxmld` (`version="1.15"`) test projects.
+  - Follow-up: live-verify `.prproj → .fcpxml` and `.drp → .fcpxml` import inside Final Cut Pro and expand `.fcpbundle` coverage for compound/multicam clips, transitions, retiming, and markers.
 
 ---
 
@@ -52,8 +53,8 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Added bidirectional standard clip metadata (`Description`, `Comments`, `Scene`, `Shot`, `Take`, `Keywords`, `Tape Name`, etc.) and custom/third-party project metadata (`Project.Metadata.Schema` / `ClipProjectItem` properties ↔ Resolve 21.2 `BtMetadataLockableBlob` `ThirdPartyMetadata`), scoped strictly to Premiere ↔ Resolve (omitted from FCPXML/OTIO/FCP7 exports).
 - [ ] **Native codec metadata on generated Resolve `MediaPoolItem`s**
   - Avoid inheriting placeholder `H.264/AAC` codec metadata strings from the scaffold template when source media is ProRes, HEVC, MXF, or MP3/WAV so Resolve displays accurate clip properties before relink/refresh.
-- [ ] **Connected video/audio lanes & transitions in FCPXML writer (`nle-interchange`)**
-  - Emit connected `<asset-clip lane="...">` elements for `V2+` and audio tracks plus `<transition>` elements in `.fcpxml` output.
+- [x] **Connected video/audio lanes, transitions, retiming & `<ref-clip>` / `<mc-clip>` in FCPXML writer (`nle-interchange`)**
+  - Emits connected `<asset-clip lane="...">` elements for `V2+` and audio tracks, `<transition>` elements, `<timeMap>` retiming, `<adjust-crop>` / `<adjust-blend>`, and `<ref-clip>` / `<mc-clip>` resources in `.fcpxml` output.
 - [x] **Native `.prproj` writer (`nle-premiere`) & Resolve marker/color decoding (`nle-resolve`)**
   - Direct `.drp → .prproj` (and IR → `.prproj`) native Premiere Pro 2026 (`Version="45"`) writer in `crates/nle-premiere/src/writer.rs`, wired into CLI (`nle-convert`) and GPUI GUI (`nle-gui`, now default target when opening `.drp` files).
   - Added Resolve 21.2 `Sm2SequenceLockableBlob` / `Sm2TiItemLockableBlob` decoding (`0x80` and `0x81` zstd) for timeline markers, clip markers, clip colors, and freeze-frame hold offsets in `nle-resolve`, plus `MZ.ZeroPoint` & Motion crop reading in `nle-premiere`.

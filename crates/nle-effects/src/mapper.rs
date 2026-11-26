@@ -1,4 +1,6 @@
-use crate::catalog::{builtin_effect_catalog, find_catalog_rule, MappingFidelity, TargetEffectOption};
+use crate::catalog::{
+    builtin_effect_catalog, find_catalog_rule_for_source, MappingFidelity, TargetEffectOption,
+};
 use nle_core::{
     ConversionMessage, EffectCategory, Marker, MarkerScope, NleFormat, Project, Severity, TrackKind,
 };
@@ -196,7 +198,12 @@ pub fn analyze_project_effects(
     let mut unmapped_count = 0usize;
 
     for (key, acc) in groups {
-        let rule = find_catalog_rule(&catalog, &acc.match_name, &acc.display_name);
+        let rule = find_catalog_rule_for_source(
+            &catalog,
+            project.source_format,
+            &acc.match_name,
+            &acc.display_name,
+        );
         let (fidelity, notes, available_targets, default_action, category, display_name) =
             if let Some(rule) = rule {
                 let targets: Vec<TargetEffectOption> = rule
@@ -209,7 +216,8 @@ pub fn analyze_project_effects(
                 let native_supported = matches!(
                     target_format,
                     NleFormat::DaVinciResolve | NleFormat::PremierePro
-                );
+                ) || (target_format == NleFormat::FinalCutPro
+                    && rule.category == EffectCategory::Transform);
 
                 let default_action = match rule.fidelity {
                     MappingFidelity::NativeAutomatic if native_supported => {

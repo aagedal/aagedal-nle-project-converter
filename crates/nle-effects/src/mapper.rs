@@ -598,6 +598,8 @@ mod tests {
                 locked: false,
                 muted: false,
                 solo: false,
+                audio_channels: 0,
+                output_bus_id: None,
                 clips: vec![Clip {
                     id: "c1".into(),
                     name: "A001.mov".into(),
@@ -652,6 +654,7 @@ mod tests {
                 markers: vec![],
             }],
             audio_tracks: vec![],
+            audio_buses: vec![],
             markers: vec![],
             metadata: BTreeMap::new(),
         });

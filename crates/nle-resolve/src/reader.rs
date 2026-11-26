@@ -1,3 +1,4 @@
+use crate::audio::{decode_fairlight_mixer, FairlightMixerData};
 use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
@@ -122,6 +123,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         height: u32,
         fps: Rational,
         start_tc_frame: i64,
+        fairlight: Option<FairlightMixerData>,
     }
 
     let mut seq_meta_by_id: HashMap<String, SeqMeta> = HashMap::new();
@@ -183,6 +185,9 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                             .map(|(start_sec, _)| (start_sec * fps.as_f64()).round() as i64)
                             .unwrap_or(0)
                             .max(0);
+                        let fairlight = child_text(seq_el, "FieldsBlob")
+                            .and_then(|h| hex_decode(&h).ok())
+                            .and_then(|b| decode_fairlight_mixer(&b));
                         if !seq_id.is_empty() {
                             if !mp_db_id.is_empty() {
                                 mp_container_by_id
@@ -198,6 +203,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                     height,
                                     fps,
                                     start_tc_frame,
+                                    fairlight,
                                 },
                             );
                         }
@@ -338,7 +344,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             &clip_color_by_id,
             &mut media_assets,
         );
-        let audio_tracks = parse_resolve_tracks(
+        let mut audio_tracks = parse_resolve_tracks(
             root,
             "AudioTrackVec",
             TrackKind::Audio,
@@ -351,6 +357,19 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             &clip_color_by_id,
             &mut media_assets,
         );
+
+        let mut audio_buses = Vec::new();
+        if let Some(fl) = meta.and_then(|m| m.fairlight.as_ref()) {
+            audio_buses = fl.buses.clone();
+            for (idx, tr) in audio_tracks.iter_mut().enumerate() {
+                if let Some(&ch) = fl.track_channels.get(&idx) {
+                    tr.audio_channels = ch;
+                }
+                if let Some(bus_id) = fl.track_bus_ids.get(&idx) {
+                    tr.output_bus_id = Some(bus_id.clone());
+                }
+            }
+        }
 
         let dur = video_tracks
             .iter()
@@ -375,6 +394,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             mark_out: None,
             video_tracks,
             audio_tracks,
+            audio_buses,
             markers,
             metadata: BTreeMap::new(),
         });
@@ -591,6 +611,18 @@ fn parse_resolve_tracks(
             }
         }
 
+        let audio_channels = if kind == TrackKind::Audio {
+            match child_text(track_el, "SubType")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                Some(1) => 1,
+                Some(0) => 2,
+                _ => 2,
+            }
+        } else {
+            0
+        };
+
         tracks.push(Track {
             index: idx + 1,
             kind,
@@ -599,6 +631,8 @@ fn parse_resolve_tracks(
             locked,
             muted: disabled,
             solo: false,
+            audio_channels,
+            output_bus_id: None,
             clips,
             transitions,
             markers: Vec::new(),

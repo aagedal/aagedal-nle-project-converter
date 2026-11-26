@@ -45,8 +45,8 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Add a user option to flatten nested/multicam cuts to source clips when targeting formats that don't support them, and emit `<ref-clip>` / `<mc-clip>` in `.fcpxml` writer.
 - [ ] **Variable speed ramps & full Clip Attributes IR (`nle-core`, `nle-premiere`, `nle-resolve`)**
   - Capture and model multi-point speed curves, alpha mode, data levels, and source audio channel mapping (`VirtualAudioTracksBA`).
-- [ ] **Stereo vs. mono Fairlight track configuration (`nle-resolve` writer)**
-  - Preserve Premiere Pro stereo vs. mono track layouts (`AudioClipTrack` `ChannelType`) in Resolve's `FLStudioModelBA` and `VirtualAudioTrackBA` (Premiere `<Link>` clip linking is already translated via `FieldsBlob` `f1.f1.f1`).
+- [x] **Stereo vs. mono Fairlight tracks & multi-bus / submix audio routing (`nle-core`, `nle-resolve`, `nle-premiere`)**
+  - Preserves stereo vs. mono audio track layouts (`Sm2TiTrack/SubType`, `VirtualAudioTrackBA`, `FLStudioModelBA` Section 0 ↔ Premiere `AudioClipTrack` `ChannelType`) and bidirectional multi-bus routing (Resolve Fairlight FlexBus Section 7 main/sub buses ↔ Premiere `AudioTrackGroup` `MasterTrack`/`SubMixTracks`/`AudioTrackInlet`/`Assign`).
 - [x] **Unused Media Pool bin media & clip/custom metadata preservation (`nle-core`, `nle-premiere`, `nle-resolve`)**
   - Added `include_unused_media` option (default `true`) to preserve unplaced project bin media items across Premiere Pro and DaVinci Resolve Media Pools (skipping Premiere `<IsProxy>true</IsProxy>` duplicates).
   - Added bidirectional standard clip metadata (`Description`, `Comments`, `Scene`, `Shot`, `Take`, `Keywords`, `Tape Name`, etc.) and custom/third-party project metadata (`Project.Metadata.Schema` / `ClipProjectItem` properties ↔ Resolve 21.2 `BtMetadataLockableBlob` `ThirdPartyMetadata`), scoped strictly to Premiere ↔ Resolve (omitted from FCPXML/OTIO/FCP7 exports).

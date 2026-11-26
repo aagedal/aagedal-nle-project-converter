@@ -199,6 +199,25 @@ pub struct MediaAsset {
     pub custom_metadata: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioBus {
+    pub id: String,
+    pub name: String,
+    /// Channel width (1 = mono, 2 = stereo, 6 = 5.1, etc.). Defaults to 2 (stereo).
+    #[serde(default = "default_bus_channels")]
+    pub channels: u32,
+    /// True for the primary/master output bus (e.g. Resolve Main bus / Premiere MasterTrack).
+    #[serde(default)]
+    pub is_main: bool,
+    /// Optional parent bus ID when this bus routes into another bus (e.g. a submix routed to Main).
+    #[serde(default)]
+    pub parent_bus_id: Option<String>,
+}
+
+fn default_bus_channels() -> u32 {
+    2
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sequence {
     pub id: String,
@@ -217,6 +236,9 @@ pub struct Sequence {
     pub mark_out: Option<i64>,
     pub video_tracks: Vec<Track>,
     pub audio_tracks: Vec<Track>,
+    /// Audio mixer buses / submixes (main mix + submix stems) and their bus-to-bus routing.
+    #[serde(default)]
+    pub audio_buses: Vec<AudioBus>,
     pub markers: Vec<Marker>,
     pub metadata: BTreeMap<String, String>,
 }
@@ -249,6 +271,12 @@ pub struct Track {
     pub locked: bool,
     pub muted: bool,
     pub solo: bool,
+    /// Audio track channel count (0 = unspecified, 1 = mono, 2 = stereo, 6 = 5.1). Ignored for video tracks.
+    #[serde(default)]
+    pub audio_channels: u32,
+    /// Optional ID of the `AudioBus` this audio track routes to (`None` = main/master bus).
+    #[serde(default)]
+    pub output_bus_id: Option<String>,
     pub clips: Vec<Clip>,
     pub transitions: Vec<Transition>,
     pub markers: Vec<Marker>,

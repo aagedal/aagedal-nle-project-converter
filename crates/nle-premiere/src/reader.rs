@@ -1,10 +1,10 @@
 use crate::lumetri::{child_text, find_descendant, nested_text, parse_keyframe_scalar, parse_lumetri_component};
 use flate2::read::GzDecoder;
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance,
-    EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
-    SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, AudioBus, Clip, ClipSourceKind, ColorConfig, EffectCategory,
+    EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -879,7 +879,138 @@ fn parse_sequence(
         }
     }
 
+    let mut audio_buses = Vec::new();
+    let mut track_uid_to_bus_id: HashMap<String, String> = HashMap::new();
+    let mut assign_num_to_bus_id: HashMap<String, String> = HashMap::new();
+
     if let Some(atg) = audio_tg {
+        // Parse MasterTrack and SubMixTracks (AudioMixTrack) + their AudioTrackInlet source routing
+        let mut mix_obj_to_bus_id: HashMap<String, String> = HashMap::new();
+        let mut mix_nodes: Vec<(bool, Node<'_, '_>)> = Vec::new();
+
+        if let Some(mt) = atg
+            .children()
+            .find(|n| n.has_tag_name("MasterTrack"))
+            .and_then(|r| resolve_node(r, by_id, by_uid))
+        {
+            mix_nodes.push((true, mt));
+        }
+        if let Some(sub_container) = atg.children().find(|n| n.has_tag_name("SubMixTracks")) {
+            for sm_ref in sub_container
+                .children()
+                .filter(|n| n.has_tag_name("SubMixTrack"))
+            {
+                if let Some(sm) = resolve_node(sm_ref, by_id, by_uid) {
+                    mix_nodes.push((false, sm));
+                }
+            }
+        }
+
+        // First pass: register every mix track's bus ID, Track.ID (for Assign), and ObjectID (for Inlet)
+        let mut main_bus_id: Option<String> = None;
+        for (idx, (is_main, mnode)) in mix_nodes.iter().enumerate() {
+            let track_inner = mnode.children().find(|n| n.has_tag_name("Track"));
+            let track_num_id = track_inner
+                .and_then(|t| child_text(t, "ID"))
+                .unwrap_or_else(|| (idx + 1).to_string());
+            let bus_id = format!("bus-{idx}");
+            if *is_main {
+                main_bus_id = Some(bus_id.clone());
+            }
+            if let Some(oid) = mnode.attribute("ObjectID") {
+                mix_obj_to_bus_id.insert(oid.to_string(), bus_id.clone());
+            }
+            if let Some(uid) = mnode.attribute("ObjectUID") {
+                mix_obj_to_bus_id.insert(uid.to_string(), bus_id.clone());
+            }
+            assign_num_to_bus_id.insert(track_num_id, bus_id);
+        }
+
+        // Map Inlet sources -> target bus_id (covers both AudioClipTrack ObjectURef and child SubMixTrack ObjectRef)
+        let mut submix_parent_from_inlet: HashMap<String, String> = HashMap::new();
+        for (idx, (_, mnode)) in mix_nodes.iter().enumerate() {
+            let target_bus_id = format!("bus-{idx}");
+            if let Some(inlet) = mnode
+                .children()
+                .find(|n| n.has_tag_name("Inlet"))
+                .and_then(|r| resolve_node(r, by_id, by_uid))
+            {
+                if let Some(sources) = inlet.children().find(|n| n.has_tag_name("Sources")) {
+                    for src in sources.children().filter(|n| n.has_tag_name("Source")) {
+                        if let Some(uref) = src.attribute("ObjectURef") {
+                            track_uid_to_bus_id.insert(uref.to_string(), target_bus_id.clone());
+                        }
+                        if let Some(oref) = src.attribute("ObjectRef") {
+                            if let Some(child_bus_id) = mix_obj_to_bus_id.get(oref) {
+                                submix_parent_from_inlet
+                                    .insert(child_bus_id.clone(), target_bus_id.clone());
+                            } else {
+                                track_uid_to_bus_id
+                                    .insert(oref.to_string(), target_bus_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build AudioBus list (only emit when there are submixes or a named main bus)
+        let has_submixes = mix_nodes.iter().any(|(is_main, _)| !*is_main);
+        let default_adaptive_ch = child_text(atg, "NumAdaptiveChannels")
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&c| c > 0)
+            .unwrap_or(2);
+        let mut parsed_buses = Vec::with_capacity(mix_nodes.len());
+        let mut main_has_custom_name = false;
+        for (idx, (is_main, mnode)) in mix_nodes.iter().enumerate() {
+            let bus_id = format!("bus-{idx}");
+            let track_inner = mnode.children().find(|n| n.has_tag_name("Track"));
+            let raw_name = track_inner
+                .and_then(|t| nested_text(t, &["Node", "Properties", "MZ.TrackName"]))
+                .filter(|s| !s.trim().is_empty());
+            if *is_main && raw_name.is_some() {
+                main_has_custom_name = true;
+            }
+            let name = raw_name.unwrap_or_else(|| {
+                if *is_main {
+                    "Master".to_string()
+                } else {
+                    format!("Submix {idx}")
+                }
+            });
+            let audio_track = mnode.children().find(|n| n.has_tag_name("AudioTrack"));
+            let channels = match audio_track
+                .and_then(|at| child_text(at, "ChannelType"))
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                Some(0) => 1,
+                Some(1) | None => 2,
+                Some(2) => 6,
+                Some(3) => default_adaptive_ch,
+                Some(_) => 2,
+            };
+            let parent_bus_id = if *is_main {
+                None
+            } else {
+                audio_track
+                    .and_then(|at| child_text(at, "Assign"))
+                    .and_then(|a| assign_num_to_bus_id.get(a.trim()).cloned())
+                    .or_else(|| submix_parent_from_inlet.get(&bus_id).cloned())
+                    .or_else(|| main_bus_id.clone())
+                    .filter(|p| p != &bus_id)
+            };
+            parsed_buses.push(AudioBus {
+                id: bus_id,
+                name,
+                channels,
+                is_main: *is_main,
+                parent_bus_id,
+            });
+        }
+        if has_submixes || main_has_custom_name {
+            audio_buses = parsed_buses;
+        }
+
         if let Some(tracks_el) = find_descendant(atg, "Tracks") {
             for (idx, track_ref) in tracks_el
                 .children()
@@ -889,7 +1020,7 @@ fn parse_sequence(
                 let Some(track_el) = resolve_node(track_ref, by_id, by_uid) else {
                     continue;
                 };
-                let track = parse_track(
+                let mut track = parse_track(
                     track_el,
                     idx + 1,
                     TrackKind::Audio,
@@ -901,6 +1032,31 @@ fn parse_sequence(
                     link_map,
                     media_map,
                 );
+                let audio_track = track_el.children().find(|n| n.has_tag_name("AudioTrack"));
+                track.audio_channels = match audio_track
+                    .and_then(|at| child_text(at, "ChannelType"))
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                {
+                    Some(0) => 1,
+                    Some(1) | None => 2,
+                    Some(2) => 6,
+                    Some(3) => default_adaptive_ch,
+                    Some(_) => 2,
+                };
+                if !audio_buses.is_empty() {
+                    let assign_bus = audio_track
+                        .and_then(|at| child_text(at, "Assign"))
+                        .and_then(|a| assign_num_to_bus_id.get(a.trim()).cloned());
+                    let inlet_bus = track_el
+                        .attribute("ObjectUID")
+                        .and_then(|u| track_uid_to_bus_id.get(u).cloned())
+                        .or_else(|| {
+                            track_el
+                                .attribute("ObjectID")
+                                .and_then(|o| track_uid_to_bus_id.get(o).cloned())
+                        });
+                    track.output_bus_id = assign_bus.or(inlet_bus).or_else(|| main_bus_id.clone());
+                }
                 for c in &track.clips {
                     max_end = max_end.max(c.end_frame);
                 }
@@ -929,6 +1085,7 @@ fn parse_sequence(
         mark_out,
         video_tracks,
         audio_tracks,
+        audio_buses,
         markers,
         metadata: BTreeMap::new(),
     }
@@ -1027,6 +1184,8 @@ fn parse_track(
         locked,
         muted,
         solo,
+        audio_channels: if kind == TrackKind::Audio { 2 } else { 0 },
+        output_bus_id: None,
         clips,
         transitions,
         markers: track_markers,

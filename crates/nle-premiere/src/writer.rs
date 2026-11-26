@@ -1040,10 +1040,69 @@ impl<'a> PrprojBuilder<'a> {
             &seq.audio_tracks
         };
 
+        // Plan Master + SubMixTrack IDs before emitting AudioClipTracks so each track knows its <Assign> target.
+        let main_bus = seq
+            .audio_buses
+            .iter()
+            .find(|b| b.is_main || b.parent_bus_id.is_none());
+        let main_bus_id = main_bus.map(|b| b.id.as_str());
+        let submix_buses: Vec<&nle_core::AudioBus> = seq
+            .audio_buses
+            .iter()
+            .filter(|b| Some(b.id.as_str()) != main_bus_id)
+            .collect();
+
+        // Assign unique numeric Track.IDs (Master = 1, ClipTracks = 2..=atracks.len()+1, SubMixes = atracks.len()+2..)
+        let mut submix_track_num_by_bus_id: HashMap<&str, usize> = HashMap::new();
+        let mut submix_obj_id_by_bus_id: HashMap<&str, u64> = HashMap::new();
+        for (s_idx, bus) in submix_buses.iter().enumerate() {
+            let track_num = atracks.len() + 2 + s_idx;
+            let obj_id = self.alloc_id();
+            submix_track_num_by_bus_id.insert(bus.id.as_str(), track_num);
+            submix_obj_id_by_bus_id.insert(bus.id.as_str(), obj_id);
+        }
+
         let mut atrack_uids = Vec::with_capacity(atracks.len());
+        let mut master_sources: Vec<(bool, String)> = Vec::new(); // (is_uref, id_str)
+        let mut submix_sources: HashMap<&str, Vec<(bool, String)>> = HashMap::new();
         for (idx, track) in atracks.iter().enumerate() {
-            let uid = self.emit_audio_track(track, idx, seq, fps, &mut link_groups, report);
+            let assign_track_num = track
+                .output_bus_id
+                .as_deref()
+                .and_then(|bid| submix_track_num_by_bus_id.get(bid).copied());
+            let uid = self.emit_audio_track(
+                track,
+                idx,
+                seq,
+                fps,
+                assign_track_num,
+                &mut link_groups,
+                report,
+            );
+            if let Some(bid) = track
+                .output_bus_id
+                .as_deref()
+                .filter(|bid| submix_track_num_by_bus_id.contains_key(*bid))
+            {
+                submix_sources.entry(bid).or_default().push((true, uid.clone()));
+            } else {
+                master_sources.push((true, uid.clone()));
+            }
             atrack_uids.push(uid);
+        }
+
+        // Wire submix-to-submix or submix-to-master routing into their parent Inlet Sources
+        for bus in &submix_buses {
+            let child_obj = submix_obj_id_by_bus_id[bus.id.as_str()].to_string();
+            if let Some(pid) = bus
+                .parent_bus_id
+                .as_deref()
+                .filter(|pid| *pid != bus.id.as_str() && submix_track_num_by_bus_id.contains_key(*pid))
+            {
+                submix_sources.entry(pid).or_default().push((false, child_obj));
+            } else {
+                master_sources.push((false, child_obj));
+            }
         }
 
         // VideoTrackGroup
@@ -1081,8 +1140,52 @@ impl<'a> PrprojBuilder<'a> {
             vtrack_uids.len() + 1
         ));
 
-        // AudioTrackGroup + AudioMixTrack (Master)
-        let master_track_id = self.emit_audio_mix_track(&atrack_uids);
+        // AudioTrackGroup + AudioMixTrack (Master + optional SubMixTracks)
+        let main_bus_name = main_bus
+            .map(|b| b.name.as_str())
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("master") && !n.eq_ignore_ascii_case("bus 1"));
+        let master_obj_id = self.alloc_id();
+        self.emit_audio_mix_track(
+            master_obj_id,
+            true,
+            1,
+            0,
+            main_bus_name,
+            None,
+            &master_sources,
+        );
+
+        let mut submix_tracks_xml = String::new();
+        if !submix_buses.is_empty() {
+            submix_tracks_xml.push_str("\t\t<SubMixTracks Version=\"1\">\n");
+            for (s_idx, bus) in submix_buses.iter().enumerate() {
+                let obj_id = submix_obj_id_by_bus_id[bus.id.as_str()];
+                let track_num = submix_track_num_by_bus_id[bus.id.as_str()];
+                let assign_parent = bus
+                    .parent_bus_id
+                    .as_deref()
+                    .filter(|pid| *pid != bus.id.as_str())
+                    .and_then(|pid| submix_track_num_by_bus_id.get(pid).copied());
+                let sources = submix_sources
+                    .get(bus.id.as_str())
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                self.emit_audio_mix_track(
+                    obj_id,
+                    false,
+                    track_num,
+                    s_idx,
+                    Some(bus.name.as_str()),
+                    assign_parent,
+                    sources,
+                );
+                submix_tracks_xml.push_str(&format!(
+                    "\t\t\t<SubMixTrack Index=\"{s_idx}\" ObjectRef=\"{obj_id}\" />\n"
+                ));
+            }
+            submix_tracks_xml.push_str("\t\t</SubMixTracks>\n");
+        }
+
         let atg_id = self.alloc_id();
         let mut atg_tracks_xml = String::new();
         for (i, uid) in atrack_uids.iter().enumerate() {
@@ -1097,12 +1200,13 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t<NextTrackID>{}</NextTrackID>\n\
              \t\t\t<FrameRate>{TICKS_PER_48KHZ_SAMPLE}</FrameRate>\n\
              \t\t</TrackGroup>\n\
-             \t\t<MasterTrack ObjectRef=\"{master_track_id}\" />\n\
+             \t\t<MasterTrack ObjectRef=\"{master_obj_id}\" />\n\
+             {submix_tracks_xml}\
              \t\t<ID>{}</ID>\n\
              \t\t<AutomationSafeFlags>0</AutomationSafeFlags>\n\
              \t\t<NumAdaptiveChannels>2</NumAdaptiveChannels>\n\
              \t</AudioTrackGroup>",
-            atrack_uids.len() + 2,
+            atrack_uids.len() + 2 + submix_buses.len(),
             Uuid::new_v4()
         ));
 
@@ -1438,12 +1542,14 @@ impl<'a> PrprojBuilder<'a> {
         track_uid
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_audio_track(
         &mut self,
         track: &Track,
         track_idx: usize,
         seq: &Sequence,
         fps: Rational,
+        assign_track_num: Option<usize>,
         link_groups: &mut BTreeMap<String, Vec<u64>>,
         report: &mut ConversionReport,
     ) -> String {
@@ -1514,6 +1620,17 @@ impl<'a> PrprojBuilder<'a> {
             ""
         };
 
+        let assign_el = if let Some(target_id) = assign_track_num {
+            format!("\t\t\t<Assign>{target_id}</Assign>\n")
+        } else {
+            String::new()
+        };
+        let channel_type_el = if track.audio_channels == 1 {
+            "\t\t\t<ChannelType>0</ChannelType>\n"
+        } else {
+            ""
+        };
+
         self.push(format!(
             "\t<AudioClipTrack ObjectUID=\"{track_uid}\" ClassID=\"097f6203-99ae-11d5-84f2-8cf14bde7040\" Version=\"7\">\n\
              \t\t<ClipTrack Version=\"2\">\n\
@@ -1551,7 +1668,9 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t</ComponentOwner>\n\
              \t\t\t<Panner ObjectRef=\"{panner_id}\" />\n\
              \t\t\t<ID>{}</ID>\n\
+             {assign_el}\
              \t\t\t<NextPannerID>4294967279</NextPannerID>\n\
+             {channel_type_el}\
              \t\t</AudioTrack>\n\
              \t</AudioClipTrack>",
             track_idx + 2,
@@ -1561,12 +1680,26 @@ impl<'a> PrprojBuilder<'a> {
         track_uid
     }
 
-    fn emit_audio_mix_track(&mut self, atrack_uids: &[String]) -> u64 {
-        let (chain_id, panner_id) = self.emit_audio_track_mixer_components(true);
+    #[allow(clippy::too_many_arguments)]
+    fn emit_audio_mix_track(
+        &mut self,
+        mix_id: u64,
+        is_master: bool,
+        track_num_id: usize,
+        track_index: usize,
+        name: Option<&str>,
+        assign_parent: Option<usize>,
+        sources: &[(bool, String)],
+    ) {
+        let (chain_id, panner_id) = self.emit_audio_track_mixer_components(is_master);
         let inlet_id = self.alloc_id();
         let mut sources_xml = String::new();
-        for (i, uid) in atrack_uids.iter().enumerate() {
-            sources_xml.push_str(&format!("\t\t\t<Source Index=\"{i}\" ObjectURef=\"{uid}\" />\n"));
+        for (i, (is_uref, id)) in sources.iter().enumerate() {
+            if *is_uref {
+                sources_xml.push_str(&format!("\t\t\t<Source Index=\"{i}\" ObjectURef=\"{id}\" />\n"));
+            } else {
+                sources_xml.push_str(&format!("\t\t\t<Source Index=\"{i}\" ObjectRef=\"{id}\" />\n"));
+            }
         }
         self.push(format!(
             "\t<AudioTrackInlet ObjectID=\"{inlet_id}\" ClassID=\"be3af080-e8c6-11d5-abc4-a1c6d5dee670\" Version=\"4\">\n\
@@ -1576,7 +1709,18 @@ impl<'a> PrprojBuilder<'a> {
              \t\t<AudioChannelLayout>{LAYOUT_STEREO}</AudioChannelLayout>\n\
              \t</AudioTrackInlet>"
         ));
-        let mix_id = self.alloc_id();
+        let sub_type = if is_master { 3 } else { 2 };
+        let assign_el = if is_master {
+            "\t\t\t<Assign>0</Assign>\n".to_string()
+        } else if let Some(parent_num) = assign_parent {
+            format!("\t\t\t<Assign>{parent_num}</Assign>\n")
+        } else {
+            String::new()
+        };
+        let name_prop = name
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| format!("\t\t\t\t\t<MZ.TrackName>{}</MZ.TrackName>\n", xml_escape(n)))
+            .unwrap_or_default();
         self.push(format!(
             "\t<AudioMixTrack ObjectID=\"{mix_id}\" ClassID=\"4b1d8400-e89e-11d5-abc4-a1a13b1e80a0\" Version=\"4\">\n\
              \t\t<AudioTrack Version=\"12\">\n\
@@ -1585,8 +1729,8 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t</ComponentOwner>\n\
              \t\t\t<Panner ObjectRef=\"{panner_id}\" />\n\
              \t\t\t<ID>{}</ID>\n\
-             \t\t\t<SubType>3</SubType>\n\
-             \t\t\t<Assign>0</Assign>\n\
+             \t\t\t<SubType>{sub_type}</SubType>\n\
+             {assign_el}\
              \t\t\t<NextPannerID>4294967279</NextPannerID>\n\
              \t\t</AudioTrack>\n\
              \t\t<Track Version=\"4\">\n\
@@ -1594,17 +1738,17 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t\t<Properties Version=\"1\">\n\
              \t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n\
              \t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n\
+             {name_prop}\
              \t\t\t\t</Properties>\n\
              \t\t\t</Node>\n\
-             \t\t\t<ID>1</ID>\n\
+             \t\t\t<ID>{track_num_id}</ID>\n\
              \t\t\t<MediaType>{MEDIA_TYPE_AUDIO}</MediaType>\n\
-             \t\t\t<Index>0</Index>\n\
+             \t\t\t<Index>{track_index}</Index>\n\
              \t\t</Track>\n\
              \t\t<Inlet ObjectRef=\"{inlet_id}\" />\n\
              \t</AudioMixTrack>",
             Uuid::new_v4()
         ));
-        mix_id
     }
 
     fn emit_audio_track_mixer_components(&mut self, is_master: bool) -> (u64, u64) {
@@ -2745,6 +2889,8 @@ fn empty_track(index: usize, kind: TrackKind, name: &str) -> Track {
         locked: false,
         muted: false,
         solo: false,
+        audio_channels: if kind == TrackKind::Audio { 2 } else { 0 },
+        output_bus_id: None,
         clips: Vec::new(),
         transitions: Vec::new(),
         markers: Vec::new(),

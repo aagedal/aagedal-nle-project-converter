@@ -77,6 +77,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
                     clips: vec![Clip {
                         id: "c1".into(),
                         name: "A001.mov".into(),
@@ -129,6 +131,8 @@ mod tests {
                     locked: true,
                     muted: false,
                     solo: false,
+                    audio_channels: 1,
+                    output_bus_id: Some("bus-1".into()),
                     clips: vec![Clip {
                         id: "a1".into(),
                         name: "A001.mov".into(),
@@ -162,6 +166,29 @@ mod tests {
                     transitions: vec![],
                     markers: vec![],
                 }],
+                audio_buses: vec![
+                    AudioBus {
+                        id: "bus-0".into(),
+                        name: "MAIN MIX".into(),
+                        channels: 2,
+                        is_main: true,
+                        parent_bus_id: None,
+                    },
+                    AudioBus {
+                        id: "bus-1".into(),
+                        name: "DIALOGUE".into(),
+                        channels: 2,
+                        is_main: false,
+                        parent_bus_id: Some("bus-0".into()),
+                    },
+                    AudioBus {
+                        id: "bus-2".into(),
+                        name: "MUSIC".into(),
+                        channels: 2,
+                        is_main: false,
+                        parent_bus_id: Some("bus-0".into()),
+                    },
+                ],
                 markers: vec![Marker {
                     frame: 50,
                     duration_frames: 25,
@@ -200,6 +227,15 @@ mod tests {
         assert_eq!(reread.sequences[0].markers[0].name, "Check Grade");
         assert_eq!(reread.sequences[0].markers[0].color, "Purple");
         assert!(reread.sequences[0].audio_tracks[0].locked);
+        assert_eq!(reread.sequences[0].audio_tracks[0].audio_channels, 1);
+        assert_eq!(reread.sequences[0].audio_buses.len(), 3);
+        assert_eq!(reread.sequences[0].audio_buses[0].name, "MAIN MIX");
+        assert_eq!(reread.sequences[0].audio_buses[1].name, "DIALOGUE");
+        assert_eq!(reread.sequences[0].audio_buses[2].name, "MUSIC");
+        assert_eq!(
+            reread.sequences[0].audio_tracks[0].output_bus_id.as_deref(),
+            Some("bus-1")
+        );
         assert_eq!(reread.media_assets.len(), 1);
         assert_eq!(
             reread.media_assets[0].metadata.get("Description").map(String::as_str),
@@ -251,6 +287,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
                     clips: vec![Clip {
                         id: "v1".into(),
                         name: "ShotA.mp4".into(),
@@ -298,6 +336,8 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    audio_channels: 1,
+                    output_bus_id: None,
                     clips: vec![],
                     transitions: vec![Transition {
                         name: "Constant Power".into(),
@@ -308,6 +348,7 @@ mod tests {
                     }],
                     markers: vec![],
                 }],
+                audio_buses: vec![],
                 markers: vec![],
                 metadata: BTreeMap::new(),
             }],
@@ -451,6 +492,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![Clip {
                             id: "ang1".into(),
                             name: "CamA.mov".into(),
@@ -485,6 +528,7 @@ mod tests {
                         markers: vec![],
                     }],
                     audio_tracks: vec![],
+                    audio_buses: vec![],
                     markers: vec![],
                     metadata: BTreeMap::new(),
                 },
@@ -507,6 +551,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![
                             Clip {
                                 id: "v-mc".into(),
@@ -580,6 +626,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![Clip {
                             id: "a-mc".into(),
                             name: "MC_3Cam".into(),
@@ -613,6 +661,7 @@ mod tests {
                         transitions: vec![],
                         markers: vec![],
                     }],
+                    audio_buses: vec![],
                     markers: vec![],
                     metadata: BTreeMap::new(),
                 },

@@ -365,6 +365,8 @@ mod tests {
                             locked: false,
                             muted: false,
                             solo: false,
+                            audio_channels: 0,
+                            output_bus_id: None,
                             clips: vec![Clip {
                                 id: "ang1".into(),
                                 name: "ÖgonKrålærepø.mov".into(),
@@ -400,6 +402,7 @@ mod tests {
                         },
                     ],
                     audio_tracks: vec![],
+                    audio_buses: vec![],
                     markers: vec![],
                     metadata: BTreeMap::new(),
                 },
@@ -422,6 +425,8 @@ mod tests {
                         locked: false,
                         muted: false,
                         solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
                         clips: vec![
                             Clip {
                                 id: "c-v1".into(),
@@ -515,6 +520,8 @@ mod tests {
                         locked: true,
                         muted: false,
                         solo: false,
+                        audio_channels: 1,
+                        output_bus_id: Some("bus-1".into()),
                         clips: vec![Clip {
                             id: "c-a1".into(),
                             name: "ÖgonKrålærepø.mov".into(),
@@ -554,6 +561,22 @@ mod tests {
                         }],
                         markers: vec![],
                     }],
+                    audio_buses: vec![
+                        AudioBus {
+                            id: "bus-0".into(),
+                            name: "MAIN MIX".into(),
+                            channels: 2,
+                            is_main: true,
+                            parent_bus_id: None,
+                        },
+                        AudioBus {
+                            id: "bus-1".into(),
+                            name: "DIALOGUE".into(),
+                            channels: 2,
+                            is_main: false,
+                            parent_bus_id: Some("bus-0".into()),
+                        },
+                    ],
                     markers: vec![Marker {
                         frame: 50,
                         duration_frames: 25,
@@ -638,6 +661,14 @@ mod tests {
         assert_eq!(main.start_tc_frame, 90_000);
         assert_eq!(main.mark_in, Some(10));
         assert_eq!(main.mark_out, Some(200));
+        assert_eq!(main.audio_buses.len(), 2);
+        assert_eq!(main.audio_buses[0].name, "MAIN MIX");
+        assert_eq!(main.audio_buses[1].name, "DIALOGUE");
+        assert_eq!(main.audio_tracks[0].audio_channels, 1);
+        assert_eq!(
+            main.audio_tracks[0].output_bus_id.as_deref(),
+            Some(main.audio_buses[1].id.as_str())
+        );
         assert_eq!(main.markers.len(), 1);
         assert_eq!(main.markers[0].name, "Review Cut");
         assert_eq!(main.markers[0].comment, "Check dissolve & multicam");

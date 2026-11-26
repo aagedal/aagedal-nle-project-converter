@@ -115,7 +115,14 @@ Verified Filter & Parameter IDs from Resolve 21.2:
 - **Alpha Mode (`Straight` / `Premultiplied` / `None`) & Data Level (`Full` / `Video`)**: stored in the MediaPool clip's `<FieldsBlob>` / `<Video>` structures.
 - **Standard & Third-Party Clip Metadata (`BtMetadataLockableBlob`)**: stored in `project.xml` `<LocableBlobSet>` with `<BlobOwner>` set to the clip's `<BtVideoInfo>` `DbId` (or `<BtAudioInfo>` `DbId` for audio-only items). Its `FieldsBlob` is a version-1 keyed-dict (`BlobData`) wrapping a `10001`-version `0x80`/`0x81` protobuf whose field `2` begins with an 8-byte header `[1_000_001: u32be][inner_len: u32be]` followed by an inner protobuf:
   - Repeated field `2`: standard metadata entries (`f1` = varint enum ID, `f2` = UTF-8 value) — verified IDs include `64` (`Description`), `65` (`Comments`), `66` (`Scene`), `67` (`Shot`), `68` (`Take`), `69` (`Angle`), `74` (`Keywords`), `78` (`Shoot Day`), `80` (`Camera #`), `88` (`Location`), `96` (`Camera Manufacturer`), `97` (`Camera Type`), `100` (`Camera Notes`), `107` (`ISO`), `115` (`LUT Used`), `116` (`Lens Type`), `211` (`Audio Notes`), `304` (`Production Name`), and `336` (`Director`).
-  - Repeated field `4`: arbitrary third-party / MAM plugin metadata entries (`f1` = UTF-8 key, `f2` = UTF-8 value, surfaced in Resolve's `GetThirdPartyMetadata` / `SetThirdPartyMetadata` API). Implemented in `crates/nle-resolve/src/state.rs`.
+  - Repeated field `4`: arbitrary third-party / MAM plugin metadata entries (`f1` = UTF-8 key, `f2` = UTF-8 value, surfaced in Resolve's `GetThirdPartyMetadata` / `SetThirdPartyMetadata` API; `Column.Intrinsic.TapeName` maps bidirectionally to Premiere `<ClipLoggingInfo><TapeName>`). Implemented in `crates/nle-resolve/src/state.rs`.
+
+## 6. Fairlight FlexBus Mixer & Stereo/Mono Audio Tracks (`FLStudioModelBA`)
+
+Stored inside `<Sm2Sequence><FieldsBlob>` under key `"FLStudioModelBA"` as Qt `qCompress` (`[u32be uncompressed_len][zlib]`). Its final `66 88 66 77` (`LastClient`) chunk contains columnar tables framed as `[u32le section_id]` followed by `(version=1, field_id, count, values)` records terminated by `0`:
+- **Section `0` (Track channels)**: `0x0B4`/`0x0B8`/`0x0B9`/`0x0BA` encode stereo vs. mono channel width (`2` stereo / `1` mono, matching `<Sm2TiTrack><SubType>` `0` stereo / `1` mono and `VirtualAudioTrackBA` `AudioType` `0` / `1`), `0x0BC` track names, `0x400`/`0x40B` assigned target bus index, and `0x458` timeline audio track index (`0xFFFF_FFFF` on stereo secondary channels).
+- **Section `7` (FlexBus buses)**: `0x0AA` main bus flag, `0x0BC` bus names, `0x10A`/`0x145`/`0x1A5` main vs. submix bus flags, `0x400`/`0x40B` parent bus routing index (`0xFFFF_FFFF` for main output bus), and `0x458` strip ID (`track_count + 1 + bus_idx`).
+- **Post-bus tail**: Section `9` strip ID `0x458 = track_count`, `0x324 = track_count + bus_count`, `0x32F = track_count`. Implemented bidirectionally in `crates/nle-resolve/src/audio.rs`.
 
 ---
 

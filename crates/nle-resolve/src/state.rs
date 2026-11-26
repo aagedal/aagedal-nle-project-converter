@@ -418,6 +418,11 @@ pub fn media_metadata_lockable_blob_xml(
             std_by_enum.entry(eid).or_insert_with(|| v.clone());
         } else if k.eq_ignore_ascii_case("log note") && !std_by_enum.contains_key(&65) {
             std_by_enum.insert(65, v.clone());
+        } else if k.eq_ignore_ascii_case("tape name") {
+            // Native Resolve MAM/Premiere interop convention for tape/reel name in ThirdPartyMetadata.
+            extra_third_party
+                .entry("Column.Intrinsic.TapeName".to_string())
+                .or_insert_with(|| v.clone());
         } else {
             // Preserve unmapped file metadata fields in ThirdPartyMetadata so nothing is lost.
             extra_third_party.entry(k.clone()).or_insert_with(|| v.clone());
@@ -558,7 +563,13 @@ pub fn decode_media_metadata_blob(
                         }
                         if let (Some(key), Some(val)) = (k, v) {
                             if !key.is_empty() {
-                                custom_meta.insert(key, val);
+                                if key == "Column.Intrinsic.TapeName" {
+                                    if !val.is_empty() {
+                                        std_meta.entry("Tape Name".to_string()).or_insert(val);
+                                    }
+                                } else {
+                                    custom_meta.insert(key, val);
+                                }
                             }
                         }
                     }

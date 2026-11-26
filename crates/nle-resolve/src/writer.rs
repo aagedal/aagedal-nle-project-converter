@@ -1,4 +1,7 @@
-use crate::audio::{mono_channel_mapping, rebuild_fairlight_track_model, FairlightTrackSpec};
+use crate::audio::{
+    mono_channel_mapping, rebuild_fairlight_track_model, stereo_channel_mapping, FairlightBusSpec,
+    FairlightTrackSpec,
+};
 use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_wrapper_hex, encode_keyed_fields, encode_protobuf,
     encode_utf16be, encode_utf16le, encode_wrapper_hex, hex_decode, hex_encode, replace_subslice,
@@ -525,11 +528,13 @@ pub fn write_drp_file(
                 node = set_child_text(&node, "Name", &xml_escape(&clip.name));
                 node = set_child_text(&node, "Start", &abs_start.to_string());
                 node = set_child_text(&node, "Duration", &clip.duration_frames().max(1).to_string());
-                node = set_child_text(
-                    &node,
-                    "VirtualAudioTrackBA",
-                    &mono_channel_mapping(clip.audio_channel.max(1)),
-                );
+                let is_stereo_track = track.audio_channels >= 2;
+                let vat_hex = if is_stereo_track {
+                    stereo_channel_mapping(clip.audio_channel.max(1))
+                } else {
+                    mono_channel_mapping(clip.audio_channel.max(1))
+                };
+                node = set_child_text(&node, "VirtualAudioTrackBA", &vat_hex);
 
                 let signed_speed = if clip.reversed && clip.speed_percent > 0.0 {
                     -clip.speed_percent
@@ -750,22 +755,70 @@ pub fn write_drp_file(
             let seq_fps_int = seq.frame_rate.timebase().max(1) as u32;
             let needs_custom_setup =
                 seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
-            if !seq.audio_tracks.is_empty() || needs_custom_setup {
+            if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() || needs_custom_setup {
                 let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
                 if let Some(caps) = re_seq_blob.captures(&tl_block) {
                     let mut blob_bytes = hex_decode(&caps[2])?;
-                    if !seq.audio_tracks.is_empty() {
+                    if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() {
+                        // Order buses so main/root bus is index 0, followed by submixes
+                        let mut ordered_buses: Vec<&nle_core::AudioBus> = Vec::new();
+                        for b in &seq.audio_buses {
+                            if b.is_main || b.parent_bus_id.is_none() {
+                                ordered_buses.push(b);
+                            }
+                        }
+                        for b in &seq.audio_buses {
+                            if !(b.is_main || b.parent_bus_id.is_none()) {
+                                ordered_buses.push(b);
+                            }
+                        }
+                        let mut bus_idx_by_id: HashMap<&str, usize> = HashMap::new();
+                        for (i, b) in ordered_buses.iter().enumerate() {
+                            bus_idx_by_id.insert(b.id.as_str(), i);
+                        }
+                        let bus_specs: Vec<FairlightBusSpec> = ordered_buses
+                            .iter()
+                            .enumerate()
+                            .map(|(i, b)| {
+                                let parent_idx = b
+                                    .parent_bus_id
+                                    .as_deref()
+                                    .and_then(|pid| bus_idx_by_id.get(pid).copied())
+                                    .filter(|&p| p != i)
+                                    .or_else(|| {
+                                        if i > 0 && !b.is_main {
+                                            Some(0)
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                FairlightBusSpec {
+                                    name: b.name.clone(),
+                                    is_main: b.is_main || parent_idx.is_none(),
+                                    parent_bus_index: parent_idx,
+                                }
+                            })
+                            .collect();
+
                         let specs: Vec<FairlightTrackSpec> = seq
                             .audio_tracks
                             .iter()
-                            .map(|t| FairlightTrackSpec {
-                                is_mono: true,
-                                name: t.name.clone(),
-                                enabled: t.enabled,
-                                locked: t.locked,
+                            .map(|t| {
+                                let bus_index = t
+                                    .output_bus_id
+                                    .as_deref()
+                                    .and_then(|bid| bus_idx_by_id.get(bid).copied())
+                                    .unwrap_or(0);
+                                FairlightTrackSpec {
+                                    is_mono: t.audio_channels < 2,
+                                    name: t.name.clone(),
+                                    enabled: t.enabled,
+                                    locked: t.locked,
+                                    bus_index,
+                                }
                             })
                             .collect();
-                        match rebuild_fairlight_track_model(&blob_bytes, &specs) {
+                        match rebuild_fairlight_track_model(&blob_bytes, &specs, &bus_specs) {
                             Ok(rebuilt) => blob_bytes = rebuilt,
                             Err(err) => {
                                 messages.push(ConversionMessage {
@@ -1535,7 +1588,8 @@ fn build_track_xml(
     node = set_child_text(&node, "FusionCompHolderItems", "");
     node = set_child_text(&node, "LayersVec", "");
     if is_audio {
-        node = set_child_text(&node, "SubType", "1");
+        let sub_type = if track.audio_channels >= 2 { "0" } else { "1" };
+        node = set_child_text(&node, "SubType", sub_type);
     }
     node = set_child_text(&node, "UserDefinedName", &xml_escape(&track.name));
     let base_flags: u32 = extract_tag_inner(&node, "Flags")

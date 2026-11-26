@@ -75,5 +75,24 @@ fn full_premiere_to_resolve_and_interchange_pipeline() {
         .expect("write FCP7 .xml from .drp");
     assert_eq!(xmeml_rep.video_clips_converted, 2);
 
+    // 6. Native Resolve .drp -> Adobe Premiere Pro .prproj conversion + re-read!
+    let back_prproj_path = dir.join("from_resolve.prproj");
+    let prproj_opts = ConversionOptions {
+        target_format: NleFormat::PremierePro,
+        ..Default::default()
+    };
+    let prproj_rep = nle_premiere::write_prproj_file(&resolve_project, &back_prproj_path, &prproj_opts)
+        .expect("write native .prproj from .drp");
+    assert_eq!(prproj_rep.sequences_converted, 1);
+    assert_eq!(prproj_rep.video_clips_converted, 2);
+    assert_eq!(prproj_rep.audio_clips_converted, 1);
+    assert!(prproj_rep.markers_written >= 1);
+
+    let reread_prproj = nle_premiere::read_prproj_file(&back_prproj_path)
+        .expect("read back native .prproj generated from .drp");
+    assert_eq!(reread_prproj.sequences.len(), 1);
+    assert_eq!(reread_prproj.sequences[0].video_tracks[0].clips.len(), 2);
+    assert!(!reread_prproj.sequences[0].markers.is_empty());
+
     let _ = std::fs::remove_dir_all(&dir);
 }

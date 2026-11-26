@@ -2,11 +2,12 @@ use crate::binary::{
     decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
     ProtoValue,
 };
-use crate::timemap::decode_media_timemap;
+use crate::state::{decode_lockable_blob, resolve_color_to_premiere_label};
+use crate::timemap::decode_media_timemap_detail;
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
-    SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, Marker, MarkerScope, MediaAsset,
+    MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin,
+    ProjectReader, Rational, Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -56,6 +57,47 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         .and_then(|xml| extract_simple_tag(xml, "ProjectName"))
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback_name);
+
+    // Decode sequence markers and per-clip markers/colors from project.xml LockableBlobs.
+    let mut seq_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
+    let mut clip_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
+    let mut clip_color_by_id: HashMap<String, u32> = HashMap::new();
+    if let Some(proj_xml) = members.get("project.xml") {
+        let sanitized = sanitize_resolve_xml(proj_xml);
+        if let Ok(doc) = Document::parse(&sanitized) {
+            for node in doc.root_element().descendants().filter(|n| n.is_element()) {
+                match node.tag_name().name() {
+                    "Sm2SequenceLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (markers, _) = decode_lockable_blob(&hex, MarkerScope::Sequence);
+                            if !markers.is_empty() {
+                                seq_markers_by_id.entry(owner).or_default().extend(markers);
+                            }
+                        }
+                    }
+                    "Sm2TiItemLockableBlob" => {
+                        if let (Some(owner), Some(hex)) =
+                            (child_text(node, "BlobOwner"), child_text(node, "FieldsBlob"))
+                        {
+                            let (markers, color) = decode_lockable_blob(&hex, MarkerScope::Clip);
+                            if !markers.is_empty() {
+                                clip_markers_by_id
+                                    .entry(owner.clone())
+                                    .or_default()
+                                    .extend(markers);
+                            }
+                            if let Some(c) = color {
+                                clip_color_by_id.insert(owner, c);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     struct SeqMeta {
         name: String,
@@ -259,6 +301,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             fps,
             start_tc_frame,
             &mp_container_by_id,
+            &clip_markers_by_id,
+            &clip_color_by_id,
             &mut media_assets,
         );
         let audio_tracks = parse_resolve_tracks(
@@ -270,6 +314,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             fps,
             start_tc_frame,
             &mp_container_by_id,
+            &clip_markers_by_id,
+            &clip_color_by_id,
             &mut media_assets,
         );
 
@@ -280,6 +326,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             .map(|c| c.end_frame)
             .max()
             .unwrap_or(0);
+
+        let markers = seq_markers_by_id.remove(&seq_id).unwrap_or_default();
 
         sequences.push(Sequence {
             id: seq_id,
@@ -294,7 +342,7 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
             mark_out: None,
             video_tracks,
             audio_tracks,
-            markers: Vec::new(),
+            markers,
             metadata: BTreeMap::new(),
         });
     }
@@ -322,6 +370,8 @@ fn parse_resolve_tracks(
     seq_fps: Rational,
     start_tc_frame: i64,
     mp_container_by_id: &HashMap<String, (ClipSourceKind, String)>,
+    clip_markers_by_id: &HashMap<String, Vec<Marker>>,
+    clip_color_by_id: &HashMap<String, u32>,
     media_assets: &mut BTreeMap<String, MediaAsset>,
 ) -> Vec<Track> {
     let Some(vec_el) = root.children().find(|n| n.has_tag_name(vec_tag)) else {
@@ -418,9 +468,14 @@ fn parse_resolve_tracks(
                     None => (ClipSourceKind::Media, media_id.clone()),
                 };
 
-                let (speed_percent, reversed) = child_text(cnode, "MediaTimemapBA")
-                    .and_then(|h| decode_media_timemap(&h))
-                    .unwrap_or((100.0, false));
+                let (speed_percent, reversed, freeze_hold_sec) = child_text(cnode, "MediaTimemapBA")
+                    .and_then(|h| decode_media_timemap_detail(&h))
+                    .unwrap_or((100.0, false, None));
+                let effective_in_frame = if let Some(hold_sec) = freeze_hold_sec {
+                    (hold_sec * seq_fps.as_f64()).round() as i64
+                } else {
+                    in_frame
+                };
 
                 let (active_angle, link_group_id) = child_text(cnode, "FieldsBlob")
                     .map(|h| decode_clip_fields_blob(&h, &clip_db_id))
@@ -446,6 +501,16 @@ fn parse_resolve_tracks(
                     }
                 }
 
+                let label_preset_index = clip_color_by_id
+                    .get(&clip_db_id)
+                    .and_then(|&c| resolve_color_to_premiere_label(c));
+                let label_name =
+                    label_preset_index.map(|idx| format!("BE.Prefs.LabelColors.{idx}"));
+                let clip_markers = clip_markers_by_id
+                    .get(&clip_db_id)
+                    .cloned()
+                    .unwrap_or_default();
+
                 clips.push(Clip {
                     id: clip_db_id,
                     name: cname,
@@ -460,8 +525,8 @@ fn parse_resolve_tracks(
                     active_angle,
                     start_frame: start,
                     end_frame: start + dur,
-                    source_in_frame: in_frame,
-                    source_out_frame: in_frame + dur,
+                    source_in_frame: effective_in_frame,
+                    source_out_frame: effective_in_frame + dur,
                     source_in_ticks: None,
                     source_out_ticks: None,
                     source_fps: clip_fps,
@@ -472,13 +537,13 @@ fn parse_resolve_tracks(
                     enabled: true,
                     audio_channel,
                     link_group_id,
-                    label_name: None,
-                    label_preset_index: None,
+                    label_name,
+                    label_preset_index,
                     motion,
                     opacity,
                     lumetri_effects: Vec::new(),
                     effects: Vec::new(),
-                    markers: Vec::new(),
+                    markers: clip_markers,
                 });
             }
         }

@@ -1,7 +1,8 @@
 use crate::binary::{
-    encode_protobuf, encode_utf16be, hex_decode, hex_encode, read_varint, write_varint, ProtoField,
+    decode_keyed_fields, decode_protobuf, decode_wrapper_bytes, encode_protobuf, encode_utf16be,
+    hex_decode, hex_encode, read_varint, write_varint, ProtoField, ProtoValue,
 };
-use nle_core::{ColorConfig, Marker, NleError, NleResult};
+use nle_core::{ColorConfig, Marker, MarkerScope, NleError, NleResult};
 use regex::Regex;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -29,6 +30,29 @@ pub fn premiere_label_to_resolve_color(preset_index: u8) -> Option<u32> {
     }
 }
 
+/// Resolve clip color enum (1..=16) -> Premiere Pro label preset index (0..=15).
+pub fn resolve_color_to_premiere_label(resolve_color: u32) -> Option<u8> {
+    match resolve_color {
+        1 => Some(13),
+        2 => Some(10),
+        3 => Some(9),
+        4 => Some(8),
+        5 => Some(3),
+        6 => Some(12),
+        7 => Some(14),
+        8 => Some(6),
+        9 => Some(5),
+        10 => Some(7),
+        11 => Some(2),
+        12 => Some(4),
+        13 => Some(1),
+        14 => Some(11),
+        15 => Some(0),
+        16 => Some(15),
+        _ => None,
+    }
+}
+
 fn marker_color_bits(color: &str) -> u64 {
     match color.to_ascii_lowercase().as_str() {
         "cyan" => 4,
@@ -48,6 +72,152 @@ fn marker_color_bits(color: &str) -> u64 {
         "cream" => 131072,
         _ => 2, // Blue default
     }
+}
+
+fn marker_color_from_bits(bits: u64) -> String {
+    match bits {
+        4 => "Cyan",
+        8 => "Green",
+        16 => "Yellow",
+        32 => "Red",
+        64 => "Pink",
+        128 => "Purple",
+        512 => "Fuchsia",
+        1024 => "Rose",
+        2048 => "Lavender",
+        4096 => "Sky",
+        8192 => "Mint",
+        16384 => "Lemon",
+        32768 => "Sand",
+        65536 => "Cocoa",
+        131072 => "Cream",
+        _ => "Blue",
+    }
+    .to_string()
+}
+
+/// Decode Resolve `Sm2SequenceLockableBlob` / `Sm2TiItemLockableBlob` `FieldsBlob` hex
+/// (supporting both `0x80` raw and `0x81` zstd) into `(markers, clip_color_enum)`.
+pub fn decode_lockable_blob(fields_blob_hex: &str, scope: MarkerScope) -> (Vec<Marker>, Option<u32>) {
+    let Ok(raw) = hex_decode(fields_blob_hex) else {
+        return (Vec::new(), None);
+    };
+    let Ok(entries) = decode_keyed_fields(&raw) else {
+        return (Vec::new(), None);
+    };
+    let Some(blob_data) = entries
+        .into_iter()
+        .find(|(k, _, _)| k == "BlobData")
+        .map(|(_, _, v)| v)
+    else {
+        return (Vec::new(), None);
+    };
+    let Ok(proto_bytes) = decode_wrapper_bytes(&blob_data) else {
+        return (Vec::new(), None);
+    };
+    let Ok(top_fields) = decode_protobuf(&proto_bytes) else {
+        return (Vec::new(), None);
+    };
+
+    let mut markers = Vec::new();
+    let mut clip_color: Option<u32> = None;
+
+    for f in top_fields {
+        match (f.number, f.value) {
+            (2, ProtoValue::Bytes(container_bytes)) => {
+                let Ok(c_fields) = decode_protobuf(&container_bytes) else {
+                    continue;
+                };
+                for cf in c_fields {
+                    if cf.number != 2 {
+                        continue;
+                    }
+                    let ProtoValue::Bytes(entry_bytes) = cf.value else {
+                        continue;
+                    };
+                    if let Some(m) = decode_marker_entry(&entry_bytes, scope) {
+                        markers.push(m);
+                    }
+                }
+            }
+            (5, ProtoValue::Varint(v)) => {
+                let c = (v / 2) as u32;
+                if c > 0 {
+                    clip_color = Some(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    markers.sort_by_key(|m| m.frame);
+    (markers, clip_color)
+}
+
+fn decode_marker_entry(entry_bytes: &[u8], scope: MarkerScope) -> Option<Marker> {
+    let fields = decode_protobuf(entry_bytes).ok()?;
+    let mut frame: Option<i64> = None;
+    let mut wrapped: Option<Vec<u8>> = None;
+
+    for f in fields {
+        match (f.number, f.value) {
+            (1, ProtoValue::Bytes(key_bytes)) => {
+                if let Ok(kfields) = decode_protobuf(&key_bytes) {
+                    for kf in kfields {
+                        if kf.number == 1 {
+                            if let ProtoValue::Varint(v) = kf.value {
+                                frame = Some((v / 2) as i64);
+                            }
+                        }
+                    }
+                }
+            }
+            (2, ProtoValue::Bytes(w)) => wrapped = Some(w),
+            _ => {}
+        }
+    }
+
+    let frame = frame?;
+    let wrapped = wrapped?;
+    if wrapped.len() < 8 {
+        return None;
+    }
+    // 8-byte header [ver: u32be][len: u32be] followed by protobuf field 1 marker body
+    let body_msg = decode_protobuf(&wrapped[8..]).ok()?;
+    let body_bytes = body_msg.into_iter().find_map(|f| match (f.number, f.value) {
+        (1, ProtoValue::Bytes(b)) => Some(b),
+        _ => None,
+    })?;
+    let body_fields = decode_protobuf(&body_bytes).ok()?;
+
+    let mut color = "Blue".to_string();
+    let mut strings: Vec<String> = Vec::new();
+    for bf in body_fields {
+        match (bf.number, bf.value) {
+            (1, ProtoValue::Varint(bits)) => color = marker_color_from_bits(bits),
+            (3, ProtoValue::Bytes(b)) => {
+                strings.push(String::from_utf8_lossy(&b).into_owned());
+            }
+            _ => {}
+        }
+    }
+
+    let comment = strings.first().cloned().unwrap_or_default();
+    let duration_frames = strings
+        .get(1)
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let name = strings.get(2).cloned().unwrap_or_default();
+
+    Some(Marker {
+        frame,
+        duration_frames,
+        name,
+        comment,
+        color,
+        scope,
+    })
 }
 
 fn length_field(field_num: u32, bytes: &[u8]) -> Vec<u8> {

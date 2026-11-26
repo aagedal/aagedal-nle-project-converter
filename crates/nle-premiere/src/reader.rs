@@ -609,7 +609,8 @@ fn parse_sequence(
         }
     }
 
-    let start_tc_frame = child_text(seq_node, "ZeroPoint")
+    let start_tc_frame = nested_text(seq_node, &["Node", "Properties", "MZ.ZeroPoint"])
+        .or_else(|| child_text(seq_node, "ZeroPoint"))
         .and_then(|s| s.trim().parse::<i64>().ok())
         .filter(|&t| t > 0)
         .map(|t| frame_rate.adobe_ticks_to_frames(t))
@@ -1299,6 +1300,26 @@ fn parse_motion_component(
                 if coords.len() >= 2 {
                     motion.anchor_x = coords[0] - 0.5;
                     motion.anchor_y = coords[1] - 0.5;
+                }
+            }
+            "8" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_left = v;
+                }
+            }
+            "9" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_top = v;
+                }
+            }
+            "10" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_right = v;
+                }
+            }
+            "11" => {
+                if let Some(v) = parse_keyframe_scalar(&start_raw) {
+                    motion.crop_bottom = v;
                 }
             }
             _ => {}

@@ -184,6 +184,10 @@ mod tests {
         assert_eq!(reread.sequences[0].frame_rate, Rational::FPS_25);
         assert_eq!(reread.sequences[0].video_tracks[0].clips.len(), 1);
         assert_eq!(reread.sequences[0].video_tracks[0].clips[0].name, "A001.mov");
+        assert_eq!(reread.sequences[0].video_tracks[0].clips[0].label_preset_index, Some(8));
+        assert_eq!(reread.sequences[0].markers.len(), 1);
+        assert_eq!(reread.sequences[0].markers[0].name, "Check Grade");
+        assert_eq!(reread.sequences[0].markers[0].color, "Purple");
         assert!(reread.sequences[0].audio_tracks[0].locked);
 
         let _ = std::fs::remove_file(&out_path);

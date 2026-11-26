@@ -1,9 +1,11 @@
 pub mod fixture;
 pub mod lumetri;
 pub mod reader;
+pub mod writer;
 
 pub use fixture::{sample_prproj_xml, write_sample_prproj};
 pub use reader::{parse_prproj_xml, read_prproj_file, PremiereReader};
+pub use writer::{build_prproj_xml, write_prproj_file, PremiereWriter};
 
 #[cfg(test)]
 mod tests {
@@ -286,5 +288,334 @@ mod tests {
         assert_eq!(clips[2].source_kind, ClipSourceKind::MulticamClip);
         assert_eq!(clips[2].media_id, "mc-src-uid");
         assert_eq!(clips[2].active_angle.as_deref(), Some("Camera 3"));
+    }
+
+    #[test]
+    fn writes_and_rereads_native_prproj_with_multicam_nested_markers_transitions_and_fx() {
+        use nle_core::*;
+        use std::collections::BTreeMap;
+
+        let project = Project {
+            name: "Resolve To Premiere RT".into(),
+            source_format: NleFormat::DaVinciResolve,
+            source_path: None,
+            color_config: ColorConfig::default(),
+            scale_to_frame_size: true,
+            bins: vec![
+                ProjectBin {
+                    id: "bin-media".into(),
+                    name: "01_Media".into(),
+                    parent_id: None,
+                    media_paths: vec!["/Media/ÖgonKrålærepø.mov".into()],
+                    sequence_ids: vec![],
+                },
+                ProjectBin {
+                    id: "bin-seqs".into(),
+                    name: "02_Sequences".into(),
+                    parent_id: None,
+                    media_paths: vec![],
+                    sequence_ids: vec!["seq-main".into(), "seq-mc".into()],
+                },
+            ],
+            media_assets: vec![MediaAsset {
+                id: "m1".into(),
+                name: "ÖgonKrålærepø.mov".into(),
+                path: "/Media/ÖgonKrålærepø.mov".into(),
+                media_kind: MediaKind::Video,
+                width: 3840,
+                height: 2160,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 500,
+                source_tc_frame: 90_000,
+                source_tc_string: "01:00:00:00".into(),
+                audio_channels: 2,
+                audio_sample_rate: 48_000,
+                color_space: None,
+            }],
+            sequences: vec![
+                Sequence {
+                    id: "seq-mc".into(),
+                    name: "MC_3Cam".into(),
+                    kind: SequenceKind::MulticamClip,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 200,
+                    start_tc_frame: 0,
+                    mark_in: None,
+                    mark_out: None,
+                    video_tracks: vec![
+                        Track {
+                            index: 1,
+                            kind: TrackKind::Video,
+                            name: "Camera 1".into(),
+                            enabled: true,
+                            locked: false,
+                            muted: false,
+                            solo: false,
+                            clips: vec![Clip {
+                                id: "ang1".into(),
+                                name: "ÖgonKrålærepø.mov".into(),
+                                media_id: "m1".into(),
+                                media_path: "/Media/ÖgonKrålærepø.mov".into(),
+                                media_kind: MediaKind::Video,
+                                source_kind: ClipSourceKind::Media,
+                                active_angle: None,
+                                start_frame: 0,
+                                end_frame: 200,
+                                source_in_frame: 0,
+                                source_out_frame: 200,
+                                source_in_ticks: None,
+                                source_out_ticks: None,
+                                source_fps: Rational::FPS_25,
+                                source_width: 3840,
+                                source_height: 2160,
+                                speed_percent: 100.0,
+                                reversed: false,
+                                enabled: true,
+                                audio_channel: 1,
+                                link_group_id: None,
+                                label_name: None,
+                                label_preset_index: None,
+                                motion: MotionTransform::default(),
+                                opacity: 100.0,
+                                lumetri_effects: vec![],
+                                effects: vec![],
+                                markers: vec![],
+                            }],
+                            transitions: vec![],
+                            markers: vec![],
+                        },
+                    ],
+                    audio_tracks: vec![],
+                    markers: vec![],
+                    metadata: BTreeMap::new(),
+                },
+                Sequence {
+                    id: "seq-main".into(),
+                    name: "Main_Timeline".into(),
+                    kind: SequenceKind::Timeline,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    start_tc_frame: 90_000, // 01:00:00:00 @ 25fps
+                    mark_in: Some(10),
+                    mark_out: Some(200),
+                    video_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Video,
+                        name: "Main V1".into(),
+                        enabled: true,
+                        locked: false,
+                        muted: false,
+                        solo: false,
+                        clips: vec![
+                            Clip {
+                                id: "c-v1".into(),
+                                name: "ÖgonKrålærepø.mov".into(),
+                                media_id: "m1".into(),
+                                media_path: "/Media/ÖgonKrålærepø.mov".into(),
+                                media_kind: MediaKind::Video,
+                                source_kind: ClipSourceKind::Media,
+                                active_angle: None,
+                                start_frame: 0,
+                                end_frame: 100,
+                                source_in_frame: 25,
+                                source_out_frame: 75,
+                                source_in_ticks: None,
+                                source_out_ticks: None,
+                                source_fps: Rational::FPS_25,
+                                source_width: 3840,
+                                source_height: 2160,
+                                speed_percent: 50.0,
+                                reversed: false,
+                                enabled: true,
+                                audio_channel: 1,
+                                link_group_id: Some("grp-1".into()),
+                                label_name: Some("BE.Prefs.LabelColors.8".into()),
+                                label_preset_index: Some(8),
+                                motion: MotionTransform {
+                                    scale: 125.0,
+                                    position_x: 0.1,
+                                    position_y: -0.05,
+                                    rotation: 4.5,
+                                    crop_left: 5.0,
+                                    ..Default::default()
+                                },
+                                opacity: 80.0,
+                                lumetri_effects: vec![LumetriData {
+                                    order: 0,
+                                    display_name: "Lumetri Color".into(),
+                                    exposure: Some(0.5),
+                                    contrast: Some(15.0),
+                                    saturation: Some(110.0),
+                                    ..Default::default()
+                                }],
+                                effects: vec![],
+                                markers: vec![],
+                            },
+                            Clip {
+                                id: "c-mc".into(),
+                                name: "MC_3Cam".into(),
+                                media_id: "seq-mc".into(),
+                                media_path: String::new(),
+                                media_kind: MediaKind::Video,
+                                source_kind: ClipSourceKind::MulticamClip,
+                                active_angle: Some("Camera 3".into()),
+                                start_frame: 100,
+                                end_frame: 200,
+                                source_in_frame: 0,
+                                source_out_frame: 100,
+                                source_in_ticks: None,
+                                source_out_ticks: None,
+                                source_fps: Rational::FPS_25,
+                                source_width: 1920,
+                                source_height: 1080,
+                                speed_percent: -100.0,
+                                reversed: true,
+                                enabled: true,
+                                audio_channel: 1,
+                                link_group_id: None,
+                                label_name: None,
+                                label_preset_index: None,
+                                motion: MotionTransform::default(),
+                                opacity: 100.0,
+                                lumetri_effects: vec![],
+                                effects: vec![],
+                                markers: vec![],
+                            },
+                        ],
+                        transitions: vec![Transition {
+                            name: "Cross Dissolve".into(),
+                            effect_id: "Cross Dissolve".into(),
+                            start_frame: 90,
+                            end_frame: 110,
+                            alignment: "center".into(),
+                        }],
+                        markers: vec![],
+                    }],
+                    audio_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Audio,
+                        name: "Dialogue".into(),
+                        enabled: true,
+                        locked: true,
+                        muted: false,
+                        solo: false,
+                        clips: vec![Clip {
+                            id: "c-a1".into(),
+                            name: "ÖgonKrålærepø.mov".into(),
+                            media_id: "m1".into(),
+                            media_path: "/Media/ÖgonKrålærepø.mov".into(),
+                            media_kind: MediaKind::Audio,
+                            source_kind: ClipSourceKind::Media,
+                            active_angle: None,
+                            start_frame: 0,
+                            end_frame: 100,
+                            source_in_frame: 25,
+                            source_out_frame: 75,
+                            source_in_ticks: None,
+                            source_out_ticks: None,
+                            source_fps: Rational::FPS_25,
+                            source_width: 0,
+                            source_height: 0,
+                            speed_percent: 50.0,
+                            reversed: false,
+                            enabled: true,
+                            audio_channel: 1,
+                            link_group_id: Some("grp-1".into()),
+                            label_name: None,
+                            label_preset_index: None,
+                            motion: MotionTransform::default(),
+                            opacity: 100.0,
+                            lumetri_effects: vec![],
+                            effects: vec![],
+                            markers: vec![],
+                        }],
+                        transitions: vec![Transition {
+                            name: "Cross Fade +3DB".into(),
+                            effect_id: "Cross Fade +3DB".into(),
+                            start_frame: 0,
+                            end_frame: 12,
+                            alignment: "start".into(),
+                        }],
+                        markers: vec![],
+                    }],
+                    markers: vec![Marker {
+                        frame: 50,
+                        duration_frames: 25,
+                        name: "Review Cut".into(),
+                        comment: "Check dissolve & multicam".into(),
+                        color: "Purple".into(),
+                        scope: MarkerScope::Sequence,
+                    }],
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            metadata: BTreeMap::new(),
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_prproj_writer_rt.prproj");
+        let opts = ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        };
+        let report = write_prproj_file(&project, &out_path, &opts).expect("write .prproj");
+        assert_eq!(report.sequences_converted, 2);
+        assert_eq!(report.video_clips_converted, 3);
+        assert_eq!(report.audio_clips_converted, 1);
+        assert_eq!(report.bins_created, 2);
+        assert_eq!(report.markers_written, 1);
+        assert_eq!(report.grades_attached, 1);
+
+        let reread = read_prproj_file(&out_path).expect("reread generated .prproj");
+        assert_eq!(reread.bins.len(), 2);
+        assert_eq!(reread.sequences.len(), 2);
+        assert_eq!(reread.media_assets.len(), 1);
+        assert_eq!(reread.media_assets[0].path, "/Media/ÖgonKrålærepø.mov");
+
+        let mc_seq = reread.sequences.iter().find(|s| s.name == "MC_3Cam").unwrap();
+        assert_eq!(mc_seq.kind, SequenceKind::MulticamClip);
+
+        let main = reread
+            .sequences
+            .iter()
+            .find(|s| s.name == "Main_Timeline")
+            .unwrap();
+        assert_eq!(main.start_tc_frame, 90_000);
+        assert_eq!(main.mark_in, Some(10));
+        assert_eq!(main.mark_out, Some(200));
+        assert_eq!(main.markers.len(), 1);
+        assert_eq!(main.markers[0].name, "Review Cut");
+        assert_eq!(main.markers[0].comment, "Check dissolve & multicam");
+        assert_eq!(main.video_tracks[0].transitions.len(), 1);
+        assert_eq!(main.video_tracks[0].transitions[0].effect_id, "AE.ADBE Cross Dissolve");
+        assert_eq!(main.audio_tracks[0].transitions.len(), 1);
+        assert_eq!(main.audio_tracks[0].transitions[0].effect_id, "Constant Power");
+        assert!(main.audio_tracks[0].locked);
+
+        let v0 = &main.video_tracks[0].clips[0];
+        let a0 = &main.audio_tracks[0].clips[0];
+        assert!((v0.speed_percent - 50.0).abs() < 1e-3);
+        assert!((v0.motion.scale - 125.0).abs() < 1e-4);
+        assert!((v0.motion.position_x - 0.1).abs() < 1e-4);
+        assert!((v0.motion.position_y - (-0.05)).abs() < 1e-4);
+        assert!((v0.motion.rotation - 4.5).abs() < 1e-4);
+        assert!((v0.motion.crop_left - 5.0).abs() < 1e-4);
+        assert!((v0.opacity - 80.0).abs() < 1e-4);
+        assert_eq!(v0.label_preset_index, Some(8));
+        assert_eq!(v0.lumetri_effects.len(), 1);
+        assert_eq!(v0.lumetri_effects[0].exposure, Some(0.5));
+        assert!(v0.link_group_id.is_some());
+        assert_eq!(v0.link_group_id, a0.link_group_id);
+
+        let v1 = &main.video_tracks[0].clips[1];
+        assert_eq!(v1.source_kind, ClipSourceKind::MulticamClip);
+        assert_eq!(v1.active_angle.as_deref(), Some("Camera 3"));
+        assert!(v1.reversed);
+        assert!((v1.speed_percent - (-100.0)).abs() < 1e-3);
+
+        let _ = std::fs::remove_file(&out_path);
     }
 }

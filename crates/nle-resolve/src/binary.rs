@@ -193,8 +193,7 @@ pub fn encode_protobuf(fields: &[ProtoField]) -> Vec<u8> {
 
 /// Unwrap Resolve's 9-byte envelope (`[version: u32be][len: u32be][flag][payload...]`).
 /// Supports both `0x80` (uncompressed protobuf) and `0x81` (Resolve 21.2 zstd-compressed protobuf).
-pub fn decode_wrapper_hex(hex: &str) -> NleResult<Vec<u8>> {
-    let raw = hex_decode(hex)?;
+pub fn decode_wrapper_bytes(raw: &[u8]) -> NleResult<Vec<u8>> {
     if raw.len() < 9 {
         return Err(NleError::InvalidFormat("Resolve blob envelope too short".into()));
     }
@@ -213,6 +212,12 @@ pub fn decode_wrapper_hex(hex: &str) -> NleResult<Vec<u8>> {
             "Unsupported Resolve blob envelope flag 0x{flag:02x}"
         ))),
     }
+}
+
+/// Unwrap Resolve's hex-encoded 9-byte envelope (`0x80` raw or `0x81` zstd).
+pub fn decode_wrapper_hex(hex: &str) -> NleResult<Vec<u8>> {
+    let raw = hex_decode(hex)?;
+    decode_wrapper_bytes(&raw)
 }
 
 /// Wrap raw protobuf bytes into Resolve's version-2 `0x80` hex envelope.

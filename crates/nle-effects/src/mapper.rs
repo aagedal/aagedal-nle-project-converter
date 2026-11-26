@@ -206,10 +206,13 @@ pub fn analyze_project_effects(
                     .cloned()
                     .collect();
 
+                let native_supported = matches!(
+                    target_format,
+                    NleFormat::DaVinciResolve | NleFormat::PremierePro
+                );
+
                 let default_action = match rule.fidelity {
-                    MappingFidelity::NativeAutomatic
-                        if target_format == NleFormat::DaVinciResolve =>
-                    {
+                    MappingFidelity::NativeAutomatic if native_supported => {
                         MappingAction::NativeConvert
                     }
                     _ => {
@@ -226,7 +229,7 @@ pub fn analyze_project_effects(
                 };
 
                 let effective_fidelity = if rule.fidelity == MappingFidelity::NativeAutomatic
-                    && target_format != NleFormat::DaVinciResolve
+                    && !native_supported
                 {
                     if targets.is_empty() {
                         MappingFidelity::Unmapped

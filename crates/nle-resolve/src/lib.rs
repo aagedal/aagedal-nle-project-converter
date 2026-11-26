@@ -370,4 +370,250 @@ mod tests {
             .expect("decode 0x81 zstd envelope");
         assert_eq!(decoded, b"Camera 3");
     }
+
+    #[test]
+    fn roundtrips_nested_multicam_linked_clips_opacity_and_reverse() {
+        let project = Project {
+            name: "Nested & Multicam RT".into(),
+            source_format: NleFormat::PremierePro,
+            media_assets: vec![MediaAsset {
+                id: "m1".into(),
+                name: "CamA.mov".into(),
+                path: "/Media/CamA.mov".into(),
+                media_kind: MediaKind::Video,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 500,
+                source_tc_frame: 0,
+                source_tc_string: "00:00:00:00".into(),
+                audio_channels: 2,
+                audio_sample_rate: 48_000,
+                color_space: None,
+            }],
+            sequences: vec![
+                Sequence {
+                    id: "mc-src".into(),
+                    name: "MC_3Cam".into(),
+                    kind: SequenceKind::MulticamClip,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    start_tc_frame: 0,
+                    mark_in: None,
+                    mark_out: None,
+                    video_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Video,
+                        name: "Camera 1".into(),
+                        enabled: true,
+                        locked: false,
+                        muted: false,
+                        solo: false,
+                        clips: vec![Clip {
+                            id: "ang1".into(),
+                            name: "CamA.mov".into(),
+                            media_id: "m1".into(),
+                            media_path: "/Media/CamA.mov".into(),
+                            media_kind: MediaKind::Video,
+                            source_kind: ClipSourceKind::Media,
+                            active_angle: None,
+                            start_frame: 0,
+                            end_frame: 250,
+                            source_in_frame: 0,
+                            source_out_frame: 250,
+                            source_in_ticks: None,
+                            source_out_ticks: None,
+                            source_fps: Rational::FPS_25,
+                            source_width: 1920,
+                            source_height: 1080,
+                            speed_percent: 100.0,
+                            reversed: false,
+                            enabled: true,
+                            audio_channel: 1,
+                            link_group_id: None,
+                            label_name: None,
+                            label_preset_index: None,
+                            motion: MotionTransform::default(),
+                            opacity: 100.0,
+                            lumetri_effects: vec![],
+                            effects: vec![],
+                            markers: vec![],
+                        }],
+                        transitions: vec![],
+                        markers: vec![],
+                    }],
+                    audio_tracks: vec![],
+                    markers: vec![],
+                    metadata: BTreeMap::new(),
+                },
+                Sequence {
+                    id: "main-edit".into(),
+                    name: "Main_Edit".into(),
+                    kind: SequenceKind::Timeline,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 200,
+                    start_tc_frame: 0,
+                    mark_in: None,
+                    mark_out: None,
+                    video_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Video,
+                        name: "V1".into(),
+                        enabled: true,
+                        locked: false,
+                        muted: false,
+                        solo: false,
+                        clips: vec![
+                            Clip {
+                                id: "v-mc".into(),
+                                name: "MC_3Cam".into(),
+                                media_id: "mc-src".into(),
+                                media_path: String::new(),
+                                media_kind: MediaKind::Video,
+                                source_kind: ClipSourceKind::MulticamClip,
+                                active_angle: Some("Camera 2".into()),
+                                start_frame: 0,
+                                end_frame: 100,
+                                source_in_frame: 0,
+                                source_out_frame: 100,
+                                source_in_ticks: None,
+                                source_out_ticks: None,
+                                source_fps: Rational::FPS_25,
+                                source_width: 1920,
+                                source_height: 1080,
+                                speed_percent: 100.0,
+                                reversed: false,
+                                enabled: true,
+                                audio_channel: 1,
+                                link_group_id: Some("link-0".into()),
+                                label_name: None,
+                                label_preset_index: None,
+                                motion: MotionTransform::default(),
+                                opacity: 85.0,
+                                lumetri_effects: vec![],
+                                effects: vec![],
+                                markers: vec![],
+                            },
+                            Clip {
+                                id: "v-rev".into(),
+                                name: "CamA.mov".into(),
+                                media_id: "m1".into(),
+                                media_path: "/Media/CamA.mov".into(),
+                                media_kind: MediaKind::Video,
+                                source_kind: ClipSourceKind::Media,
+                                active_angle: None,
+                                start_frame: 100,
+                                end_frame: 200,
+                                source_in_frame: 50,
+                                source_out_frame: 150,
+                                source_in_ticks: None,
+                                source_out_ticks: None,
+                                source_fps: Rational::FPS_25,
+                                source_width: 1920,
+                                source_height: 1080,
+                                speed_percent: -100.0,
+                                reversed: true,
+                                enabled: true,
+                                audio_channel: 1,
+                                link_group_id: None,
+                                label_name: None,
+                                label_preset_index: None,
+                                motion: MotionTransform::default(),
+                                opacity: 100.0,
+                                lumetri_effects: vec![],
+                                effects: vec![],
+                                markers: vec![],
+                            },
+                        ],
+                        transitions: vec![],
+                        markers: vec![],
+                    }],
+                    audio_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Audio,
+                        name: "A1".into(),
+                        enabled: true,
+                        locked: false,
+                        muted: false,
+                        solo: false,
+                        clips: vec![Clip {
+                            id: "a-mc".into(),
+                            name: "MC_3Cam".into(),
+                            media_id: "mc-src".into(),
+                            media_path: String::new(),
+                            media_kind: MediaKind::Audio,
+                            source_kind: ClipSourceKind::MulticamClip,
+                            active_angle: Some("Camera 2".into()),
+                            start_frame: 0,
+                            end_frame: 100,
+                            source_in_frame: 0,
+                            source_out_frame: 100,
+                            source_in_ticks: None,
+                            source_out_ticks: None,
+                            source_fps: Rational::FPS_25,
+                            source_width: 0,
+                            source_height: 0,
+                            speed_percent: 100.0,
+                            reversed: false,
+                            enabled: true,
+                            audio_channel: 1,
+                            link_group_id: Some("link-0".into()),
+                            label_name: None,
+                            label_preset_index: None,
+                            motion: MotionTransform::default(),
+                            opacity: 100.0,
+                            lumetri_effects: vec![],
+                            effects: vec![],
+                            markers: vec![],
+                        }],
+                        transitions: vec![],
+                        markers: vec![],
+                    }],
+                    markers: vec![],
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_mc_nested_rt.drp");
+        write_drp_file(&project, &out_path, &ConversionOptions::default()).expect("write .drp");
+
+        let reread = read_drp_file(&out_path).expect("reread .drp");
+        // No ghost media created for MC_3Cam
+        assert_eq!(reread.media_assets.len(), 1);
+        assert_eq!(reread.media_assets[0].path, "/Media/CamA.mov");
+
+        let mc_seq = reread
+            .sequences
+            .iter()
+            .find(|s| s.name == "MC_3Cam")
+            .expect("multicam sequence");
+        assert_eq!(mc_seq.kind, SequenceKind::MulticamClip);
+
+        let main = reread
+            .sequences
+            .iter()
+            .find(|s| s.name == "Main_Edit")
+            .expect("main edit");
+        let v_mc = &main.video_tracks[0].clips[0];
+        let a_mc = &main.audio_tracks[0].clips[0];
+        assert_eq!(v_mc.source_kind, ClipSourceKind::MulticamClip);
+        assert_eq!(v_mc.active_angle.as_deref(), Some("Camera 2"));
+        assert!((v_mc.opacity - 85.0).abs() < 1e-4);
+        assert!(v_mc.link_group_id.is_some());
+        assert_eq!(v_mc.link_group_id, a_mc.link_group_id);
+
+        let v_rev = &main.video_tracks[0].clips[1];
+        assert!(v_rev.reversed);
+        assert!((v_rev.speed_percent - (-100.0)).abs() < 1e-4);
+        // 500 - 150 = 350 reversed record-in frame
+        assert_eq!(v_rev.source_in_frame, 350);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
 }

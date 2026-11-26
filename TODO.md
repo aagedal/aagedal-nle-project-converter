@@ -38,13 +38,15 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Decoded `Sm2MpCompoundClip`, `Sm2MpMulticamClip`, nested `Sm2MpTimelineClip` references, `FieldsBlob` multicam active angle + linked clip groups, `EffectFiltersBA` transforms/crop/opacity, and all 4 `MediaTimemapBA` speed modes (forward, reverse `-100%`, freeze `0%`, identity) in `nle-resolve` (plus reverse/freeze encoding in `timemap.rs`).
 - [x] **Premiere Pro nested sequence, multicam, reverse & interpret-FPS reading (`nle-premiere`)**
   - Resolved `VideoSequenceSource`/`AudioSequenceSource` inside `parse_clip`, detected `<IsMulticam>` + `<SelectedTrackIndex>` (`Camera N`), `<PlayBackwards>true</PlayBackwards>`, and `<IsFrameRateOverridden>` / `<OveriddenFrameRate>`.
-- [ ] **Compound clip, nested timeline & multicam writing + optional flatten fallback (`nle-resolve`, `nle-interchange`)**
-  - Emit native `Sm2MpCompoundClip` / `Sm2MpMulticamClip` / nested `Sm2MpTimelineClip` in `.drp` writer and `<ref-clip>` / `<mc-clip>` in `.fcpxml` writer, plus a user option to flatten nested/multicam cuts to source clips when targeting formats that don't support them.
+- [x] **Compound clip, nested timeline & multicam writing in Resolve `.drp` (`nle-resolve`)**
+  - Emits native `<Sm2MpCompoundClip>` (`SequenceType=1`), `<Sm2MpMulticamClip>` (`SequenceType=2`), and nested `<Sm2MpTimelineClip>` `<MediaRef>` links, plus `<FieldsBlob>` active multicam angle (`f1.f3`) & linked clip UUID groups (`f1.f1.f1`), native Opacity (`Filter 2 param 1`), and reversed `<In>` / `MediaTimemapBA` (`-100%`).
+  - Verified live in DaVinci Resolve Studio 21.2 (`Premiere2026_Corpus.prproj → .drp`: 7/7 media online incl. Unicode & interpreted 25fps, native `Multicam`, native nested `Timeline`, `50%`/`200%`/`-100%` speeds, `Opacity=85.0`, `ZoomX=0.45`/`1.1`, linked video+audio groups).
+- [ ] **Optional flatten fallback for nested/multicam + FCPXML `<ref-clip>` / `<mc-clip>` writing (`nle-resolve`, `nle-interchange`)**
+  - Add a user option to flatten nested/multicam cuts to source clips when targeting formats that don't support them, and emit `<ref-clip>` / `<mc-clip>` in `.fcpxml` writer.
 - [ ] **Variable speed ramps & full Clip Attributes IR (`nle-core`, `nle-premiere`, `nle-resolve`)**
-  - Capture and model multi-point speed curves, interpret-footage FPS/TC overrides, alpha mode, data levels, and source audio channel mapping (`VirtualAudioTracksBA`).
-- [ ] **Stereo vs. mono Fairlight track configuration & clip linking (`nle-resolve` writer)**
-  - Preserve Premiere Pro stereo vs. mono track layouts (`AudioClipTrack` `ChannelType`) in Resolve's `FLStudioModelBA` and `VirtualAudioTrackBA`.
-  - Write Premiere `<Link>` groups into Resolve clip `FieldsBlob` (`f1.f1.f1` linked DbId keyed-dict) so linked video/audio clips stay grouped on the timeline.
+  - Capture and model multi-point speed curves, alpha mode, data levels, and source audio channel mapping (`VirtualAudioTracksBA`).
+- [ ] **Stereo vs. mono Fairlight track configuration (`nle-resolve` writer)**
+  - Preserve Premiere Pro stereo vs. mono track layouts (`AudioClipTrack` `ChannelType`) in Resolve's `FLStudioModelBA` and `VirtualAudioTrackBA` (Premiere `<Link>` clip linking is already translated via `FieldsBlob` `f1.f1.f1`).
 - [ ] **Optional unused Media Pool bin media preservation**
   - Add a conversion option to include unplaced project bin media items in the target Resolve Media Pool (currently only timeline-referenced media is written).
 - [ ] **Native codec metadata on generated Resolve `MediaPoolItem`s**

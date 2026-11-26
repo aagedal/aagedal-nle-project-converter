@@ -186,13 +186,17 @@ pub fn decode_media_timemap(hex: &str) -> Option<(f64, bool)> {
 }
 
 /// Encode source in-point as Resolve's record-domain frame position (integer or `whole|<f64_le_hex>`).
+/// For reversed clips (`reversed = true`), Resolve measures `<In>` backwards from the end of the media
+/// (`(asset_frames - source_out) / source_fps / |speed| * timeline_fps`).
 pub fn retimed_source_in(
     source_in: i64,
+    source_out: i64,
+    asset_frames: i64,
     source_fps: f64,
     timeline_fps: f64,
     speed_percent: f64,
+    reversed: bool,
 ) -> String {
-    let src_in = source_in.max(0) as f64;
     let src_rate = if source_fps > 0.0 { source_fps } else { 25.0 };
     let tl_rate = if timeline_fps > 0.0 { timeline_fps } else { 25.0 };
     let speed = if speed_percent.abs() > 1e-6 {
@@ -201,7 +205,13 @@ pub fn retimed_source_in(
         1.0
     };
 
-    let record_frames = src_in / src_rate / speed * tl_rate;
+    let effective_src_frames = if reversed {
+        (asset_frames - source_out).max(0) as f64
+    } else {
+        source_in.max(0) as f64
+    };
+
+    let record_frames = effective_src_frames / src_rate / speed * tl_rate;
     let whole = record_frames.floor();
     let frac = record_frames - whole;
     if frac.abs() < 1e-12 {

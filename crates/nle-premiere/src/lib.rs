@@ -150,4 +150,141 @@ mod tests {
         assert_eq!(seq.audio_tracks[0].transitions[0].end_frame, 7);
         assert_eq!(seq.audio_tracks[0].transitions[0].alignment, "start");
     }
+
+    #[test]
+    fn parses_reverse_interpret_fps_nested_sequence_and_multicam() {
+        use nle_core::{ClipSourceKind, SequenceKind};
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PremiereData Version="3">
+  <Sequence ObjectID="1" ObjectUID="mc-src-uid">
+    <Name>MC_3Cam_Source</Name>
+    <TrackGroups>
+      <TrackGroup><Second ObjectRef="2"/></TrackGroup>
+    </TrackGroups>
+  </Sequence>
+  <VideoTrackGroup ObjectID="2">
+    <FrameRect>0,0,1920,1080</FrameRect>
+    <TrackGroup><FrameRate>10160640000</FrameRate><Tracks/></TrackGroup>
+  </VideoTrackGroup>
+
+  <Sequence ObjectID="10" ObjectUID="sub-seq-uid">
+    <Name>Sub_B_Roll</Name>
+    <TrackGroups>
+      <TrackGroup><Second ObjectRef="11"/></TrackGroup>
+    </TrackGroups>
+  </Sequence>
+  <VideoTrackGroup ObjectID="11">
+    <FrameRect>0,0,1920,1080</FrameRect>
+    <TrackGroup><FrameRate>10160640000</FrameRate><Tracks/></TrackGroup>
+  </VideoTrackGroup>
+
+  <Sequence ObjectID="20" ObjectUID="main-seq-uid">
+    <Name>Main_Edit</Name>
+    <TrackGroups>
+      <TrackGroup><Second ObjectRef="21"/></TrackGroup>
+    </TrackGroups>
+  </Sequence>
+  <VideoTrackGroup ObjectID="21">
+    <FrameRect>0,0,1920,1080</FrameRect>
+    <TrackGroup><FrameRate>10160640000</FrameRate><Tracks><Track ObjectRef="22"/></Tracks></TrackGroup>
+  </VideoTrackGroup>
+  <VideoClipTrack ObjectID="22">
+    <ClipTrack>
+      <ClipItems><TrackItems>
+        <TrackItem ObjectRef="30"/>
+        <TrackItem ObjectRef="31"/>
+        <TrackItem ObjectRef="32"/>
+      </TrackItems></ClipItems>
+    </ClipTrack>
+  </VideoClipTrack>
+
+  <VideoClipTrackItem ObjectID="30">
+    <ClipTrackItem>
+      <TrackItem><Start>0</Start><End>1016064000000</End></TrackItem>
+      <SubClip ObjectRef="40"/>
+    </ClipTrackItem>
+  </VideoClipTrackItem>
+  <VideoClipTrackItem ObjectID="31">
+    <ClipTrackItem>
+      <TrackItem><Start>1016064000000</Start><End>2032128000000</End></TrackItem>
+      <SubClip ObjectRef="41"/>
+    </ClipTrackItem>
+  </VideoClipTrackItem>
+  <VideoClipTrackItem ObjectID="32">
+    <ClipTrackItem>
+      <TrackItem><Start>2032128000000</Start><End>3048192000000</End></TrackItem>
+      <SubClip ObjectRef="42"/>
+    </ClipTrackItem>
+  </VideoClipTrackItem>
+
+  <SubClip ObjectID="40"><Name>ReverseClip.mov</Name><Clip ObjectRef="50"/></SubClip>
+  <SubClip ObjectID="41"><Name>Sub_B_Roll</Name><Clip ObjectRef="51"/></SubClip>
+  <SubClip ObjectID="42"><Name>MC_3Cam_Source</Name><Clip ObjectRef="52"/></SubClip>
+
+  <VideoClip ObjectID="50">
+    <Clip>
+      <Source ObjectRef="60"/>
+      <PlayBackwards>true</PlayBackwards>
+      <InPoint>0</InPoint><OutPoint>1016064000000</OutPoint>
+    </Clip>
+  </VideoClip>
+  <VideoClip ObjectID="51">
+    <Clip>
+      <Source ObjectRef="61"/>
+      <InPoint>0</InPoint><OutPoint>1016064000000</OutPoint>
+    </Clip>
+  </VideoClip>
+  <VideoClip ObjectID="52">
+    <Clip>
+      <Source ObjectRef="62"/>
+      <SelectedTrackIndex>2</SelectedTrackIndex>
+      <IsMulticam>true</IsMulticam>
+      <InPoint>0</InPoint><OutPoint>1016064000000</OutPoint>
+    </Clip>
+  </VideoClip>
+
+  <VideoMediaSource ObjectID="60"><MediaSource><Media ObjectURef="media-1"/></MediaSource></VideoMediaSource>
+  <VideoSequenceSource ObjectID="61"><SequenceSource><Sequence ObjectURef="sub-seq-uid"/></SequenceSource></VideoSequenceSource>
+  <VideoSequenceSource ObjectID="62"><SequenceSource><Sequence ObjectURef="mc-src-uid"/></SequenceSource></VideoSequenceSource>
+
+  <Media ObjectUID="media-1">
+    <ActualMediaFilePath>/Media/ReverseClip.mov</ActualMediaFilePath>
+    <VideoStream ObjectRef="70"/>
+  </Media>
+  <VideoStream ObjectID="70">
+    <IsFrameRateOverridden>true</IsFrameRateOverridden>
+    <OveriddenFrameRate>10160640000</OveriddenFrameRate>
+    <FrameRate>5080320000</FrameRate>
+    <FrameRect>0,0,1920,1080</FrameRect>
+  </VideoStream>
+</PremiereData>"#;
+
+        let project = parse_prproj_xml(xml, "Premiere2026SchemaTest").expect("parse prproj");
+        // Only the actual media file should be in media_assets (not the nested/multicam sequences)
+        assert_eq!(project.media_assets.len(), 1);
+        assert_eq!(project.media_assets[0].frame_rate, Rational::FPS_25);
+
+        let mc_seq = project.sequences.iter().find(|s| s.id == "mc-src-uid").unwrap();
+        assert_eq!(mc_seq.kind, SequenceKind::MulticamClip);
+
+        let main = project.sequences.iter().find(|s| s.id == "main-seq-uid").unwrap();
+        let clips = &main.video_tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+
+        // Clip 0: reversed -100% + interpret footage FPS override (50 -> 25)
+        assert!(clips[0].reversed);
+        assert!((clips[0].speed_percent - (-100.0)).abs() < 1e-6);
+        assert_eq!(clips[0].source_fps, Rational::FPS_25);
+        assert_eq!(clips[0].source_kind, ClipSourceKind::Media);
+
+        // Clip 1: nested sequence
+        assert_eq!(clips[1].source_kind, ClipSourceKind::NestedSequence);
+        assert_eq!(clips[1].media_id, "sub-seq-uid");
+
+        // Clip 2: multicam clip with SelectedTrackIndex=2 -> Camera 3
+        assert_eq!(clips[2].source_kind, ClipSourceKind::MulticamClip);
+        assert_eq!(clips[2].media_id, "mc-src-uid");
+        assert_eq!(clips[2].active_angle.as_deref(), Some("Camera 3"));
+    }
 }

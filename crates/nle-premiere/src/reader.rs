@@ -1,10 +1,10 @@
 use crate::lumetri::{child_text, find_descendant, nested_text, parse_keyframe_scalar, parse_lumetri_component};
 use flate2::read::GzDecoder;
 use nle_core::{
-    frames_to_timecode, Clip, ColorConfig, EffectCategory, EffectInstance, EffectParameter,
-    LumetriData, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat,
-    NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, Track, TrackKind,
-    Transition,
+    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance,
+    EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence,
+    SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -106,6 +106,34 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
     for seq_node in root.children().filter(|n| n.has_tag_name("Sequence")) {
         let seq = parse_sequence(seq_node, &by_id, &by_uid, &link_map, &mut media_map);
         sequences.push(seq);
+    }
+
+    // Tag multicam source sequences and upgrade linked audio clips referencing them.
+    let mut multicam_seq_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for seq in &sequences {
+        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+            for clip in &track.clips {
+                if clip.source_kind == ClipSourceKind::MulticamClip && !clip.media_id.is_empty() {
+                    multicam_seq_ids.insert(clip.media_id.clone());
+                }
+            }
+        }
+    }
+    if !multicam_seq_ids.is_empty() {
+        for seq in &mut sequences {
+            if multicam_seq_ids.contains(&seq.id) {
+                seq.kind = SequenceKind::MulticamClip;
+            }
+            for track in seq.video_tracks.iter_mut().chain(seq.audio_tracks.iter_mut()) {
+                for clip in &mut track.clips {
+                    if clip.source_kind == ClipSourceKind::NestedSequence
+                        && multicam_seq_ids.contains(&clip.media_id)
+                    {
+                        clip.source_kind = ClipSourceKind::MulticamClip;
+                    }
+                }
+            }
+        }
     }
 
     // Also collect any project-level Media elements not yet referenced in sequences
@@ -361,13 +389,19 @@ fn extract_media_asset(
         .or_else(|| child_text(media, "Title"))
         .unwrap_or_else(|| "media".to_string());
 
-    let (width, height) = media
+    let video_stream_node = media
         .children()
         .find(|n| n.has_tag_name("VideoStream"))
         .and_then(|vs_ref| vs_ref.attribute("ObjectRef"))
-        .and_then(|oref| by_id.get(oref).copied())
+        .and_then(|oref| by_id.get(oref).copied());
+
+    let (width, height) = video_stream_node
         .and_then(|vs| parse_frame_rect(child_text(vs, "FrameRect").as_deref()))
         .unwrap_or((0, 0));
+
+    let asset_fps = video_stream_node
+        .and_then(extract_video_stream_fps)
+        .unwrap_or(Rational::FPS_25);
 
     let ext = Path::new(&name)
         .extension()
@@ -391,7 +425,7 @@ fn extract_media_asset(
         media_kind,
         width,
         height,
-        frame_rate: Rational::FPS_25,
+        frame_rate: asset_fps,
         duration_frames: 0,
         source_tc_frame: 0,
         source_tc_string: "00:00:00:00".to_string(),
@@ -399,6 +433,26 @@ fn extract_media_asset(
         audio_sample_rate: 48_000,
         color_space: None,
     })
+}
+
+fn extract_video_stream_fps(vs: Node<'_, '_>) -> Option<Rational> {
+    let overridden = child_text(vs, "IsFrameRateOverridden")
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // Note: Premiere Pro's XML schema spells this tag "OveriddenFrameRate" (single 'r', double 'd').
+    let ticks_opt = if overridden {
+        child_text(vs, "OveriddenFrameRate")
+            .or_else(|| child_text(vs, "OverriddenFrameRate"))
+            .or_else(|| child_text(vs, "FrameRate"))
+    } else {
+        child_text(vs, "FrameRate")
+    };
+    let ticks = ticks_opt?.trim().parse::<i64>().ok()?;
+    if ticks > 0 && ticks < 9_000_000_000_000_000_000 {
+        Some(Rational::from_adobe_frame_ticks(ticks))
+    } else {
+        None
+    }
 }
 
 fn parse_frame_rect(rect: Option<&str>) -> Option<(u32, u32)> {
@@ -767,6 +821,8 @@ fn parse_clip(
     } else {
         MediaKind::Video
     };
+    let mut source_kind = ClipSourceKind::Media;
+    let mut active_angle: Option<String> = None;
     let mut source_fps = seq_fps;
     let mut source_w = seq_w;
     let mut source_h = seq_h;
@@ -778,6 +834,7 @@ fn parse_clip(
     let mut source_tc_frame = 0i64;
     let mut sample_rate = 48_000u32;
     let mut speed_percent = 100.0f64;
+    let mut reversed = false;
     let mut audio_channel = 1u32;
     let mut label_name: Option<String> = None;
     let mut label_preset_index: Option<u8> = None;
@@ -842,7 +899,23 @@ fn parse_clip(
                     .and_then(|num| num.parse::<u8>().ok());
             }
 
-            if let Some((path, mid, media_node)) = find_media_for_clip(clip_el, by_id, by_uid) {
+            if let Some(seq_uid) = find_sequence_uid_for_clip(clip_el, by_id, by_uid) {
+                media_id = seq_uid;
+                let inner_clip = clip_el.children().find(|n| n.has_tag_name("Clip"));
+                let is_mc = inner_clip
+                    .and_then(|c| child_text(c, "IsMulticam"))
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if is_mc {
+                    source_kind = ClipSourceKind::MulticamClip;
+                    active_angle = inner_clip
+                        .and_then(|c| child_text(c, "SelectedTrackIndex"))
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .map(|idx| format!("Camera {}", idx + 1));
+                } else {
+                    source_kind = ClipSourceKind::NestedSequence;
+                }
+            } else if let Some((path, mid, media_node)) = find_media_for_clip(clip_el, by_id, by_uid) {
                 media_path = path;
                 media_id = mid;
                 let ext = Path::new(&media_path.replace('\\', "/"))
@@ -859,14 +932,18 @@ fn parse_clip(
                     media_kind = MediaKind::Audio;
                 }
 
-                if let Some((rw, rh)) = media_node
+                if let Some(vs) = media_node
                     .children()
                     .find(|n| n.has_tag_name("VideoStream"))
                     .and_then(|r| resolve_node(r, by_id, by_uid))
-                    .and_then(|vs| parse_frame_rect(child_text(vs, "FrameRect").as_deref()))
                 {
-                    source_w = rw;
-                    source_h = rh;
+                    if let Some((rw, rh)) = parse_frame_rect(child_text(vs, "FrameRect").as_deref()) {
+                        source_w = rw;
+                        source_h = rh;
+                    }
+                    if let Some(overridden_fps) = extract_video_stream_fps(vs) {
+                        source_fps = overridden_fps;
+                    }
                 }
             }
 
@@ -884,6 +961,18 @@ fn parse_clip(
                     .and_then(|s| s.trim().parse::<f64>().ok())
                 {
                     speed_percent = if ps.abs() <= 10.0 { ps * 100.0 } else { ps };
+                }
+                if child_text(inner, "PlayBackwards")
+                    .or_else(|| child_text(clip_el, "PlayBackwards"))
+                    .map(|v| v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    reversed = true;
+                    if speed_percent > 0.0 {
+                        speed_percent = -speed_percent;
+                    }
+                } else if speed_percent < 0.0 {
+                    reversed = true;
                 }
             }
 
@@ -920,39 +1009,43 @@ fn parse_clip(
         .max(source_out_frame)
         .max((end_frame - start_frame).max(1));
 
-    media_map
-        .entry(resolved_media_id.clone())
-        .and_modify(|existing| {
-            if existing.duration_frames < dur_est {
-                existing.duration_frames = dur_est;
-            }
-            if existing.width == 0 && source_w > 0 && kind == TrackKind::Video {
-                existing.width = source_w;
-                existing.height = source_h;
-            }
-            if existing.media_kind == MediaKind::Audio && media_kind == MediaKind::Video {
-                existing.media_kind = MediaKind::Video;
-            }
-        })
-        .or_insert_with(|| MediaAsset {
-            id: resolved_media_id.clone(),
-            name: Path::new(&media_path.replace('\\', "/"))
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| name.clone()),
-            path: media_path.clone(),
-            media_kind,
-            width: if kind == TrackKind::Video { source_w } else { 0 },
-            height: if kind == TrackKind::Video { source_h } else { 0 },
-            frame_rate: source_fps,
-            duration_frames: dur_est,
-            source_tc_frame,
-            source_tc_string: frames_to_timecode(source_tc_frame, source_fps),
-            audio_channels: 2,
-            audio_sample_rate: sample_rate,
-            color_space: None,
-        });
+    // Register or update media asset record only for actual media-backed clips
+    // (never pollute media_assets with nested sequence / multicam containers).
+    if source_kind == ClipSourceKind::Media {
+        media_map
+            .entry(resolved_media_id.clone())
+            .and_modify(|existing| {
+                if existing.duration_frames < dur_est {
+                    existing.duration_frames = dur_est;
+                }
+                if existing.width == 0 && source_w > 0 && kind == TrackKind::Video {
+                    existing.width = source_w;
+                    existing.height = source_h;
+                }
+                if existing.media_kind == MediaKind::Audio && media_kind == MediaKind::Video {
+                    existing.media_kind = MediaKind::Video;
+                }
+            })
+            .or_insert_with(|| MediaAsset {
+                id: resolved_media_id.clone(),
+                name: Path::new(&media_path.replace('\\', "/"))
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone()),
+                path: media_path.clone(),
+                media_kind,
+                width: if kind == TrackKind::Video { source_w } else { 0 },
+                height: if kind == TrackKind::Video { source_h } else { 0 },
+                frame_rate: source_fps,
+                duration_frames: dur_est,
+                source_tc_frame,
+                source_tc_string: frames_to_timecode(source_tc_frame, source_fps),
+                audio_channels: 2,
+                audio_sample_rate: sample_rate,
+                color_space: None,
+            });
+    }
 
     // Extract components (Motion, Opacity, Lumetri, and ALL other video/audio effects!)
     let mut motion = MotionTransform::default();
@@ -1123,8 +1216,8 @@ fn parse_clip(
         media_id: resolved_media_id,
         media_path,
         media_kind,
-        source_kind: nle_core::ClipSourceKind::Media,
-        active_angle: None,
+        source_kind,
+        active_angle,
         start_frame,
         end_frame,
         source_in_frame,
@@ -1135,7 +1228,7 @@ fn parse_clip(
         source_width: source_w,
         source_height: source_h,
         speed_percent,
-        reversed: speed_percent < 0.0,
+        reversed,
         enabled,
         audio_channel,
         link_group_id: link_map.get(ti_obj_id).cloned(),

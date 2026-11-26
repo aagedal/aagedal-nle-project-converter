@@ -17,10 +17,10 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Automated `DaVinciResolveScript` generators covering multi-track V1/V2 + stereo/mono audio, transitions, transforms, fades, clip colors, markers, compound clips (`Sm2MpCompoundClip`), nested timelines (`Sm2MpTimelineClip`), 3-angle multicam with live SmartSwitch cuts (`Sm2MpMulticamClip`), respeed (`50%`, `200%`, `-100%` reverse, `0%` freeze, Optical Flow / Frame Blend / Pitch Correction), and Clip Attributes (`FPS` override, `Start TC`, `Alpha mode`, `Data Level`, `SetAudioMapping`).
   - Schema documented in [docs/RESOLVE_21_SCHEMA.md](docs/RESOLVE_21_SCHEMA.md).
 
-- [ ] **Adobe Premiere Pro 2026 live test project** *(Priority #1 & #2)*
-  - Build a multi-track reference `.prproj` using real footage (multi-codec video, multi-channel audio, embedded timecode, Unicode filenames, retimed clips including reverse/speed-ramp, interpret footage / clip attributes, nested sequences, multicam source sequence with angle cuts, Lumetri grades, Motion keyframes, transitions, markers, Essential Sound, and nested bins).
-  - Verify direct `.prproj → .drp` conversion opens cleanly in DaVinci Resolve with all media online and frame-accurate in/out points.
-  - Test `.drp → FCP7 XML (.xml)` and `.drp → .prproj` (native writer) re-import back into Premiere Pro 2026.
+- [x] **Adobe Premiere Pro 2026 live test project** *(Priority #1 & #2)*
+  - Automated CEP ExtendScript generator (`scripts/premiere/build_premiere_corpus.py`) producing multi-track V1/V2 + A1-A3, Unicode filenames, Lumetri, Motion keyframes, Opacity, Gaussian Blur, Cross Dissolve, Constant Power, markers, retiming (`50%` Optical Flow, `200%`, `-100%` `<PlayBackwards>`), Interpret Footage (`<IsFrameRateOverridden>` / `<OveriddenFrameRate>` + Start TC + PAR), nested sequence (`Sub_B_Roll`), and 3-angle multicam (`<IsMulticam>` + `<SelectedTrackIndex>`).
+  - Schema documented in [docs/PREMIERE_2026_SCHEMA.md](docs/PREMIERE_2026_SCHEMA.md) alongside live Resolve → Premiere FCP7 XML import findings.
+  - Remaining: test native `.drp → .prproj` writer re-import back into Premiere Pro 2026 once implemented.
 
 - [ ] **Final Cut Pro live test project** *(Priority #3 & #4)*
   - Export real timelines from Final Cut Pro (`.fcpxml` / `.fcpxmld`) with connected clips, secondary storylines, compound clips, multicam clips, titles, transitions, retiming, and markers.
@@ -36,8 +36,8 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
 - [x] **Resolve 21.2 respeed, compound/nested/multicam, and `EffectFiltersBA` reading (`nle-resolve`, `nle-core`)**
   - Added `SequenceKind` (`Timeline`, `CompoundClip`, `MulticamClip`), `ClipSourceKind`, and `Clip.active_angle` to `nle-core`.
   - Decoded `Sm2MpCompoundClip`, `Sm2MpMulticamClip`, nested `Sm2MpTimelineClip` references, `FieldsBlob` multicam active angle + linked clip groups, `EffectFiltersBA` transforms/crop/opacity, and all 4 `MediaTimemapBA` speed modes (forward, reverse `-100%`, freeze `0%`, identity) in `nle-resolve` (plus reverse/freeze encoding in `timemap.rs`).
-- [ ] **Premiere Pro nested sequence & multicam reading (`nle-premiere`)**
-  - Resolve `SequenceSource` inside `parse_clip`, detect `IsMultiCam` / active camera angle, and map into `SequenceKind` / `ClipSourceKind` / `active_angle`.
+- [x] **Premiere Pro nested sequence, multicam, reverse & interpret-FPS reading (`nle-premiere`)**
+  - Resolved `VideoSequenceSource`/`AudioSequenceSource` inside `parse_clip`, detected `<IsMulticam>` + `<SelectedTrackIndex>` (`Camera N`), `<PlayBackwards>true</PlayBackwards>`, and `<IsFrameRateOverridden>` / `<OveriddenFrameRate>`.
 - [ ] **Compound clip, nested timeline & multicam writing + optional flatten fallback (`nle-resolve`, `nle-interchange`)**
   - Emit native `Sm2MpCompoundClip` / `Sm2MpMulticamClip` / nested `Sm2MpTimelineClip` in `.drp` writer and `<ref-clip>` / `<mc-clip>` in `.fcpxml` writer, plus a user option to flatten nested/multicam cuts to source clips when targeting formats that don't support them.
 - [ ] **Variable speed ramps & full Clip Attributes IR (`nle-core`, `nle-premiere`, `nle-resolve`)**

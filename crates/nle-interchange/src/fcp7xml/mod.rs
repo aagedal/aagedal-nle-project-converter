@@ -12,45 +12,148 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn warns_when_multiple_timelines_are_selected() {
+    fn exports_multiple_timelines_with_bins_and_speed_ramps_and_roundtrips() {
         let dir = std::env::temp_dir().join("aagedal_fcp7_multi_seq_test");
         let _ = fs::remove_dir_all(&dir);
         let out = dir.join("multi.xml");
 
-        let mk_seq = |id: &str, name: &str| Sequence {
+        let mk_seq = |id: &str, name: &str, with_ramp: bool| Sequence {
             id: id.into(),
             name: name.into(),
             kind: SequenceKind::Timeline,
             width: 1920,
             height: 1080,
             frame_rate: Rational::FPS_25,
-            duration_frames: 0,
+            duration_frames: 100,
             start_tc_frame: 0,
             mark_in: None,
             mark_out: None,
-            video_tracks: Vec::new(),
+            video_tracks: vec![Track {
+                index: 1,
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+                audio_channels: 0,
+                output_bus_id: None,
+                clips: vec![Clip {
+                    id: format!("c-{id}"),
+                    name: "Shared.mov".into(),
+                    media_id: "m1".into(),
+                    media_path: "/Volumes/Media/Shared.mov".into(),
+                    media_kind: MediaKind::Video,
+                    source_kind: ClipSourceKind::Media,
+                    active_angle: None,
+                    start_frame: 0,
+                    end_frame: 100,
+                    source_in_frame: 0,
+                    source_out_frame: 125,
+                    source_in_ticks: None,
+                    source_out_ticks: None,
+                    source_fps: Rational::FPS_25,
+                    source_width: 1920,
+                    source_height: 1080,
+                    speed_percent: 125.0,
+                    reversed: false,
+                    speed_keyframes: if with_ramp {
+                        vec![
+                            SpeedKeyframe {
+                                timeline_sec: 0.0,
+                                source_sec: 0.0,
+                            },
+                            SpeedKeyframe {
+                                timeline_sec: 2.0,
+                                source_sec: 1.0,
+                            },
+                            SpeedKeyframe {
+                                timeline_sec: 4.0,
+                                source_sec: 5.0,
+                            },
+                        ]
+                    } else {
+                        vec![]
+                    },
+                    retime_interpolation: if with_ramp {
+                        RetimeInterpolation::FrameBlending
+                    } else {
+                        RetimeInterpolation::Default
+                    },
+                    enabled: true,
+                    audio_channel: 0,
+                    link_group_id: None,
+                    label_name: None,
+                    label_preset_index: None,
+                    motion: MotionTransform::default(),
+                    opacity: 100.0,
+                    blend_mode: BlendMode::Normal,
+                    lumetri_effects: vec![],
+                    effects: vec![],
+                    markers: vec![],
+                }],
+                transitions: vec![],
+                markers: vec![],
+            }],
             audio_tracks: Vec::new(),
             audio_buses: Vec::new(),
             markers: Vec::new(),
             metadata: BTreeMap::new(),
         };
         let proj = Project {
-            name: "Multi".into(),
+            name: "MultiProject".into(),
             source_format: NleFormat::DaVinciResolve,
-            sequences: vec![mk_seq("s1", "Reel_1"), mk_seq("s2", "Reel_2")],
+            bins: vec![ProjectBin {
+                id: "b1".into(),
+                name: "Edits".into(),
+                parent_id: None,
+                media_paths: vec![],
+                sequence_ids: vec!["s1".into()],
+                custom_metadata: BTreeMap::new(),
+            }],
+            sequences: vec![
+                mk_seq("s1", "Reel_1", true),
+                mk_seq("s2", "Reel_2", false),
+            ],
             ..Default::default()
         };
 
         let report = write_fcp7_xml_file(&proj, &out, &ConversionOptions::default()).unwrap();
-        assert_eq!(report.sequences_converted, 1);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.code == "FCP7_SINGLE_SEQUENCE" && m.severity == Severity::Warning),
-            "expected FCP7_SINGLE_SEQUENCE warning, got: {:?}",
-            report.messages
-        );
+        assert_eq!(report.sequences_converted, 2);
+        assert_eq!(report.bins_created, 1);
+        assert_eq!(report.video_clips_converted, 2);
+        assert_eq!(report.media_assets_linked, 1);
+
+        let raw = fs::read_to_string(&out).unwrap();
+        assert!(raw.contains("<project>"));
+        assert!(raw.contains("<bin id="));
+        assert!(raw.contains("<parameterid>graphdict</parameterid>"));
+        assert!(raw.contains("<parameterid>frameblending</parameterid>"));
+
+        let read_back = read_fcp7_xml_file(&out).expect("read back multi-sequence FCP7 XML");
+        assert_eq!(read_back.name, "MultiProject");
+        assert_eq!(read_back.bins.len(), 1);
+        assert_eq!(read_back.bins[0].name, "Edits");
+        assert_eq!(read_back.sequences.len(), 2);
+
+        let r1 = read_back
+            .sequences
+            .iter()
+            .find(|s| s.name == "Reel_1")
+            .expect("Reel_1");
+        let c1 = &r1.video_tracks[0].clips[0];
+        assert_eq!(c1.speed_keyframes.len(), 3);
+        assert!((c1.speed_keyframes[1].timeline_sec - 2.0).abs() < 1e-3);
+        assert!((c1.speed_keyframes[1].source_sec - 1.0).abs() < 1e-3);
+        assert!((c1.speed_keyframes[2].source_sec - 5.0).abs() < 1e-3);
+        assert_eq!(c1.retime_interpolation, RetimeInterpolation::FrameBlending);
+
+        let r2 = read_back
+            .sequences
+            .iter()
+            .find(|s| s.name == "Reel_2")
+            .expect("Reel_2");
+        assert_eq!(r2.video_tracks[0].clips[0].media_path, "/Volumes/Media/Shared.mov");
 
         let _ = fs::remove_dir_all(&dir);
     }

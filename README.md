@@ -13,8 +13,8 @@ A free, open-source (**GPL-3.0-or-later**) desktop GUI and CLI built in **100% R
 | **Adobe Premiere Pro** (`.prproj`) | Yes | Yes | Writes Premiere Pro 2026 (`Version="45"`). Earlier Premiere Pro versions may reject native `.prproj` output (use FCP7 XML `.xml` as fallback). |
 | **DaVinci Resolve** (`.drp` / `.drt`) | Yes | Yes | Writes DaVinci Resolve 21 (`DbPrjVer="17"`). Tested live on Resolve Studio 21.2. Earlier Resolve versions may reject native `.drp` output (use `.fcpxml` or `.otio` as fallback). |
 | **Final Cut Pro** (`.fcpbundle`, `.fcpxml`, `.fcpxmld`) | Yes | Yes (`.fcpxml` 1.11) | Pure-Rust `.fcpbundle` CoreData/plist and FCPXML 1.8–1.15 reader verified against Final Cut Pro 11. `.fcpxml` output is currently **experimental** (pending full live FCP import verification). |
-| **OpenTimelineIO** (`.otio`, `.otiod`, `.otioz`) | Yes | Yes (`.otio`) | Reads `Timeline.1`, `SerializableCollection.1`, and nested `Stack.1` (including `.otiod`/`.otioz` bundles and modern `media_references`). Writer exports the first selected timeline per file (auto-flattens nested/multicam clips). |
-| **FCP7 XML** (`.xml`) | Yes | Yes | XMEML v4/v5; reads full `<project>` bins, multiple `<sequence>`s, `-1` transition boundaries, Motion/Crop/Opacity/Blend/Time Remap filters, and `<link>` groups (auto-detects `<fcpxml>` in `.xml` files). Writer exports the first selected timeline per file (auto-flattens nested/multicam clips). |
+| **OpenTimelineIO** (`.otio`, `.otiod`, `.otioz`) | Yes | Yes (`.otio`) | Reads `Timeline.1`, `SerializableCollection.1`, and nested `Stack.1` (including `.otiod`/`.otioz` bundles and modern `media_references`). Writer exports `Timeline.1` for single-timeline or `SerializableCollection.1` for multi-timeline selections (auto-flattens nested/multicam clips). |
+| **FCP7 XML** (`.xml`) | Yes | Yes | XMEML v4/v5; reads and writes full `<project>` bins, multiple `<sequence>`s, Motion/Crop/Opacity/Blend/Time Remap filters (including variable speed ramps), transitions, and `<link>` groups (reader auto-detects `<fcpxml>` in `.xml` files; writer auto-flattens nested/multicam clips). |
 | **CMX 3600 EDL** (`.edl`) | Yes | Yes | Cuts, dissolves/wipes, blanks/gaps, `M2` retiming/reverse/freeze, `* FROM CLIP NAME:` / `* SOURCE FILE:`, Avid `* LOC:` & Resolve pipe markers, and `A1`–`A4` audio. Ideal for Final Cut Pro conform & VFX handoffs. |
 | **AAF** (`.aaf`) | Yes | Yes (experimental) | Pure-Rust OLE2/CFB Structured Storage (v3/v4) AAF v1.1 reader & writer (`CompositionMob`, `MasterMob`, `SourceMob`, `NetworkLocator`, multi-track video/audio, transitions, `VideoSpeedControl`, markers, nested sequences). Enables Final Cut Pro ↔ Avid / Pro Tools / Resolve AAF workflows. `.aaf` output is currently **experimental** pending live Avid/Pro Tools verification. |
 
@@ -29,10 +29,9 @@ A free, open-source (**GPL-3.0-or-later**) desktop GUI and CLI built in **100% R
 
 ## Known Alpha Limitations
 
-- **Variable speed ramps**: Multi-point `SpeedKeyframe` curves round-trip between FCPXML and Resolve `MediaTimemapBA`; native Premiere `TimeRemapping` keyframe curve writing is still in progress.
+- **Variable speed ramps**: Multi-point `SpeedKeyframe` curves round-trip across FCPXML, FCP7 XML, and Resolve `MediaTimemapBA`; native Premiere `TimeRemapping` keyframe curve writing is still in progress.
 - **Resolve Clip Attributes blobs**: `DataLevels` and `AlphaMode` round-trip into Resolve Media Pool blobs is still pending.
 - **Final Cut Pro**: `.fcpbundle` compound/multicam reading and live Final Cut Pro import verification of generated `.fcpxml` files are still in progress.
-- **OTIO / FCP7 XML**: Single-timeline formats — if multiple timelines are selected, only the first timeline is exported (with a warning in the conversion report).
 
 See [TODO.md](TODO.md) for the full roadmap and live-NLE test matrix.
 

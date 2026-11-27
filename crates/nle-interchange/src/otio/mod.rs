@@ -13,23 +13,68 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn warns_when_multiple_timelines_are_selected() {
+    fn exports_multiple_timelines_as_serializable_collection_and_roundtrips() {
         let dir = std::env::temp_dir().join("aagedal_otio_multi_seq_test");
         let _ = fs::remove_dir_all(&dir);
         let out = dir.join("multi.otio");
 
-        let mk_seq = |id: &str, name: &str| Sequence {
+        let mk_seq = |id: &str, name: &str, fps: Rational, clip_name: &str| Sequence {
             id: id.into(),
             name: name.into(),
             kind: SequenceKind::Timeline,
             width: 1920,
             height: 1080,
-            frame_rate: Rational::FPS_25,
-            duration_frames: 0,
+            frame_rate: fps,
+            duration_frames: 50,
             start_tc_frame: 0,
             mark_in: None,
             mark_out: None,
-            video_tracks: Vec::new(),
+            video_tracks: vec![Track {
+                index: 1,
+                kind: TrackKind::Video,
+                name: "V1".into(),
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+                audio_channels: 0,
+                output_bus_id: None,
+                clips: vec![Clip {
+                    id: format!("c-{id}"),
+                    name: clip_name.into(),
+                    media_id: format!("m-{id}"),
+                    media_path: format!("/Media/{clip_name}"),
+                    media_kind: MediaKind::Video,
+                    source_kind: ClipSourceKind::Media,
+                    active_angle: None,
+                    start_frame: 0,
+                    end_frame: 50,
+                    source_in_frame: 0,
+                    source_out_frame: 50,
+                    source_in_ticks: None,
+                    source_out_ticks: None,
+                    source_fps: fps,
+                    source_width: 1920,
+                    source_height: 1080,
+                    speed_percent: 100.0,
+                    reversed: false,
+                    speed_keyframes: vec![],
+                    retime_interpolation: RetimeInterpolation::Default,
+                    enabled: true,
+                    audio_channel: 0,
+                    link_group_id: None,
+                    label_name: None,
+                    label_preset_index: None,
+                    motion: MotionTransform::default(),
+                    opacity: 100.0,
+                    blend_mode: BlendMode::Normal,
+                    lumetri_effects: vec![],
+                    effects: vec![],
+                    markers: vec![],
+                }],
+                transitions: vec![],
+                markers: vec![],
+            }],
             audio_tracks: Vec::new(),
             audio_buses: Vec::new(),
             markers: Vec::new(),
@@ -38,20 +83,37 @@ mod tests {
         let proj = Project {
             name: "Multi".into(),
             source_format: NleFormat::PremierePro,
-            sequences: vec![mk_seq("s1", "Edit_Main"), mk_seq("s2", "Edit_Alt")],
+            sequences: vec![
+                mk_seq("s1", "Edit_Main", Rational::FPS_25, "A001.mov"),
+                mk_seq("s2", "Edit_Alt", Rational::FPS_24, "B001.mov"),
+            ],
             ..Default::default()
         };
 
         let report = write_otio_file(&proj, &out, &ConversionOptions::default()).unwrap();
-        assert_eq!(report.sequences_converted, 1);
+        assert_eq!(report.sequences_converted, 2);
+        assert_eq!(report.video_clips_converted, 2);
         assert!(
             report
                 .messages
                 .iter()
-                .any(|m| m.code == "OTIO_SINGLE_SEQUENCE" && m.severity == Severity::Warning),
-            "expected OTIO_SINGLE_SEQUENCE warning, got: {:?}",
+                .any(|m| m.code == "OTIO_SERIALIZABLE_COLLECTION" && m.severity == Severity::Info),
+            "expected OTIO_SERIALIZABLE_COLLECTION info, got: {:?}",
             report.messages
         );
+
+        let raw = fs::read_to_string(&out).unwrap();
+        assert!(raw.contains("\"SerializableCollection.1\""));
+
+        let read_back = read_otio_file(&out).expect("read back multi-timeline .otio");
+        assert_eq!(read_back.name, "Multi");
+        assert_eq!(read_back.sequences.len(), 2);
+        assert_eq!(read_back.sequences[0].name, "Edit_Main");
+        assert_eq!(read_back.sequences[0].frame_rate, Rational::FPS_25);
+        assert_eq!(read_back.sequences[0].video_tracks[0].clips[0].media_path, "/Media/A001.mov");
+        assert_eq!(read_back.sequences[1].name, "Edit_Alt");
+        assert_eq!(read_back.sequences[1].frame_rate, Rational::FPS_24);
+        assert_eq!(read_back.sequences[1].video_tracks[0].clips[0].media_path, "/Media/B001.mov");
 
         let _ = fs::remove_dir_all(&dir);
     }

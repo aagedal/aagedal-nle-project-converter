@@ -144,6 +144,9 @@ pub fn apply_app_theme(cx: &mut App) {
         c.accent = color_alpha(ACCENT, 0.22);
         c.accent_foreground = rgb(TEXT).into();
 
+        c.switch = rgb(BORDER_STRONG).into();
+        c.switch_thumb = rgb(0xffffff).into();
+
         c.success = rgb(GREEN).into();
         c.warning = rgb(AMBER).into();
         c.danger = rgb(RED).into();

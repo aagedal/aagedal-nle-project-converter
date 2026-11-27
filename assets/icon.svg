@@ -1,4 +1,165 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#9333ea"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="26" font-weight="600" fill="#ffffff">AN</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Base squircle gradient -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#221740"/>
+      <stop offset="48%" stop-color="#131627"/>
+      <stop offset="100%" stop-color="#0b1a2a"/>
+    </linearGradient>
+
+    <!-- Ambient studio glows -->
+    <radialGradient id="glow-purple" cx="22%" cy="20%" r="58%">
+      <stop offset="0%" stop-color="#a855f7" stop-opacity="0.38"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-cyan" cx="80%" cy="82%" r="56%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Outer squircle rim bevel -->
+    <linearGradient id="rim-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d8b4fe" stop-opacity="0.36"/>
+      <stop offset="50%" stop-color="#94a3b8" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#67e8f9" stop-opacity="0.28"/>
+    </linearGradient>
+
+    <!-- Top track clips (Source NLE: Premiere violet / indigo) -->
+    <linearGradient id="clip-violet" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="55%" stop-color="#9333ea"/>
+      <stop offset="100%" stop-color="#7e22ce"/>
+    </linearGradient>
+    <linearGradient id="clip-indigo" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+
+    <!-- Bottom track clips (Target NLE: Resolve cyan / emerald) -->
+    <linearGradient id="clip-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="clip-emerald" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+
+    <!-- Playhead gradient -->
+    <linearGradient id="playhead-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.25"/>
+    </linearGradient>
+
+    <!-- Center badge stroke gradient -->
+    <linearGradient id="badge-ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="50%" stop-color="#e2e8f0"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+
+    <!-- Center badge surface -->
+    <linearGradient id="badge-bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e2438"/>
+      <stop offset="100%" stop-color="#0d101b"/>
+    </linearGradient>
+
+    <clipPath id="squircle-clip">
+      <rect x="0" y="0" width="1024" height="1024" rx="228"/>
+    </clipPath>
+
+    <filter id="badge-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#04060d" flood-opacity="0.72"/>
+    </filter>
+    <filter id="clip-shadow" x="-15%" y="-25%" width="130%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#05070f" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#squircle-clip)">
+    <!-- Base tile -->
+    <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg-grad)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#glow-purple)"/>
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#glow-cyan)"/>
+
+    <!-- Subtle timeline ruler ticks along top -->
+    <g stroke="#94a3b8" stroke-opacity="0.22" stroke-linecap="round">
+      <line x1="176" y1="156" x2="176" y2="196" stroke-width="8"/>
+      <line x1="260" y1="168" x2="260" y2="196" stroke-width="6"/>
+      <line x1="344" y1="156" x2="344" y2="196" stroke-width="8"/>
+      <line x1="428" y1="168" x2="428" y2="196" stroke-width="6"/>
+      <line x1="596" y1="168" x2="596" y2="196" stroke-width="6"/>
+      <line x1="680" y1="156" x2="680" y2="196" stroke-width="8"/>
+      <line x1="764" y1="168" x2="764" y2="196" stroke-width="6"/>
+      <line x1="848" y1="156" x2="848" y2="196" stroke-width="8"/>
+    </g>
+
+    <!-- Vertical NLE Playhead rail -->
+    <rect x="506" y="184" width="12" height="696" rx="6" fill="url(#playhead-grad)"/>
+    <!-- Playhead pentagon cap -->
+    <path d="M474 134 C474 125 481 118 490 118 L534 118 C543 118 550 125 550 134 L550 166 C550 171 548 176 544 179 L518 202 C514.5 205 509.5 205 506 202 L480 179 C476 176 474 171 474 166 Z" fill="#fbbf24"/>
+
+    <!-- Top Timeline Track Groove -->
+    <rect x="120" y="248" width="784" height="176" rx="40" fill="#0b0e18" fill-opacity="0.62" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+
+    <!-- Top Track Clips (Source NLE) -->
+    <g filter="url(#clip-shadow)">
+      <rect x="142" y="268" width="444" height="136" rx="28" fill="url(#clip-violet)"/>
+      <!-- Subtle specular top bar on clip -->
+      <rect x="166" y="282" width="396" height="12" rx="6" fill="#ffffff" fill-opacity="0.24"/>
+      <!-- Stylized timeline keyframe diamonds -->
+      <rect x="184" y="328" width="22" height="22" rx="4" transform="rotate(45 195 339)" fill="#ffffff" fill-opacity="0.88"/>
+      <line x1="216" y1="339" x2="368" y2="339" stroke="#ffffff" stroke-opacity="0.45" stroke-width="10" stroke-linecap="round"/>
+      <rect x="378" y="328" width="22" height="22" rx="4" transform="rotate(45 389 339)" fill="#ffffff" fill-opacity="0.88"/>
+
+      <rect x="606" y="268" width="276" height="136" rx="28" fill="url(#clip-indigo)"/>
+      <rect x="630" y="282" width="228" height="12" rx="6" fill="#ffffff" fill-opacity="0.22"/>
+      <line x1="646" y1="339" x2="836" y2="339" stroke="#ffffff" stroke-opacity="0.38" stroke-width="10" stroke-linecap="round"/>
+    </g>
+
+    <!-- Bottom Timeline Track Groove -->
+    <rect x="120" y="600" width="784" height="176" rx="40" fill="#0b0e18" fill-opacity="0.62" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+
+    <!-- Bottom Track Clips (Target NLE) -->
+    <g filter="url(#clip-shadow)">
+      <rect x="142" y="620" width="276" height="136" rx="28" fill="url(#clip-cyan)"/>
+      <rect x="166" y="634" width="228" height="12" rx="6" fill="#ffffff" fill-opacity="0.24"/>
+      <!-- Stylized audio waveform bars -->
+      <g fill="#ffffff" fill-opacity="0.72">
+        <rect x="184" y="676" width="14" height="36" rx="7"/>
+        <rect x="212" y="662" width="14" height="64" rx="7"/>
+        <rect x="240" y="672" width="14" height="44" rx="7"/>
+        <rect x="268" y="658" width="14" height="72" rx="7"/>
+        <rect x="296" y="678" width="14" height="32" rx="7"/>
+        <rect x="324" y="668" width="14" height="52" rx="7"/>
+      </g>
+
+      <rect x="438" y="620" width="444" height="136" rx="28" fill="url(#clip-emerald)"/>
+      <rect x="462" y="634" width="396" height="12" rx="6" fill="#ffffff" fill-opacity="0.24"/>
+      <g fill="#ffffff" fill-opacity="0.72">
+        <rect x="646" y="670" width="14" height="48" rx="7"/>
+        <rect x="674" y="656" width="14" height="76" rx="7"/>
+        <rect x="702" y="666" width="14" height="56" rx="7"/>
+        <rect x="730" y="676" width="14" height="36" rx="7"/>
+        <rect x="758" y="660" width="14" height="68" rx="7"/>
+        <rect x="786" y="672" width="14" height="44" rx="7"/>
+        <rect x="814" y="680" width="14" height="28" rx="7"/>
+      </g>
+    </g>
+
+    <!-- Center Bidirectional Conversion Medallion -->
+    <g filter="url(#badge-shadow)">
+      <circle cx="512" cy="512" r="144" fill="url(#badge-bg)" stroke="url(#badge-ring)" stroke-width="14"/>
+      <!-- Top arrow pointing right -->
+      <path d="M430 472 L578 472 M540 434 L582 472 L540 510"
+            fill="none" stroke="#f8fafc" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- Bottom arrow pointing left -->
+      <path d="M594 552 L446 552 M484 514 L442 552 L484 590"
+            fill="none" stroke="#67e8f9" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <!-- Crisp inner squircle rim highlight -->
+    <rect x="6" y="6" width="1012" height="1012" rx="222" fill="none" stroke="url(#rim-grad)" stroke-width="12"/>
+  </g>
 </svg>

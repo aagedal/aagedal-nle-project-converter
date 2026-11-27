@@ -30,7 +30,6 @@ A free, open-source (**GPL-3.0-or-later**) desktop GUI and CLI built in **100% R
 ## Known Alpha Limitations
 
 - **Variable speed ramps**: Multi-point `SpeedKeyframe` curves round-trip across FCPXML, FCP7 XML, and Resolve `MediaTimemapBA`; native Premiere `TimeRemapping` keyframe curve writing is still in progress.
-- **Resolve Clip Attributes blobs**: `DataLevels` and `AlphaMode` round-trip into Resolve Media Pool blobs is still pending.
 - **Final Cut Pro**: `.fcpbundle` compound/multicam reading and live Final Cut Pro import verification of generated `.fcpxml` files are still in progress.
 
 See [TODO.md](TODO.md) for the full roadmap and live-NLE test matrix.

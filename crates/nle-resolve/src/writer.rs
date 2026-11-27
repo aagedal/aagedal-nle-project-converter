@@ -3,9 +3,9 @@ use crate::audio::{
     FairlightTrackSpec,
 };
 use crate::binary::{
-    decode_keyed_fields, decode_protobuf, decode_wrapper_hex, encode_keyed_fields, encode_protobuf,
-    encode_utf16be, encode_utf16le, encode_wrapper_hex, hex_decode, hex_encode, replace_subslice,
-    ProtoField, ProtoValue,
+    decode_flag_prefixed_hex, decode_keyed_fields, decode_protobuf, decode_wrapper_hex,
+    encode_flag_prefixed_hex, encode_keyed_fields, encode_protobuf, encode_utf16be, encode_utf16le,
+    encode_wrapper_hex, hex_decode, hex_encode, replace_subslice, ProtoField, ProtoValue,
 };
 use crate::grade::{build_grade_and_stabilization_body, build_version_table_xml};
 use crate::state::{
@@ -18,9 +18,10 @@ use crate::timemap::{
     STILL_SOURCE_IN,
 };
 use nle_core::{
-    flatten_nested_and_multicam_clips, BlendMode, Clip, ClipSourceKind, ConversionMessage,
-    ConversionOptions, ConversionReport, MediaKind, MotionTransform, NleError, NleFormat,
-    NleResult, Project, ProjectWriter, RetimeInterpolation, Sequence, SequenceKind, Severity,
+    flatten_nested_and_multicam_clips, AlphaMode, BlendMode, Clip, ClipSourceKind,
+    ConversionMessage, ConversionOptions, ConversionReport, DataLevels, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectWriter, RetimeInterpolation, Sequence,
+    SequenceKind, Severity,
 };
 use regex::Regex;
 use std::borrow::Cow;
@@ -1378,6 +1379,8 @@ fn ensure_media_pool_item(
         asset.and_then(|a| a.color_space.as_deref()),
         vcodec.as_deref(),
         acodec.as_deref(),
+        asset.map(|a| a.alpha_mode).unwrap_or(AlphaMode::Default),
+        asset.map(|a| a.data_levels).unwrap_or(DataLevels::Auto),
     )?;
     node = rewritten;
 
@@ -1468,6 +1471,8 @@ fn ensure_media_pool_asset(
         asset.color_space.as_deref(),
         vcodec.as_deref(),
         acodec.as_deref(),
+        asset.alpha_mode,
+        asset.data_levels,
     )?;
     node = rewritten;
 
@@ -1501,6 +1506,8 @@ fn rewrite_media_pool_av_blobs(
     color_space: Option<&str>,
     video_codec: Option<&str>,
     audio_codec: Option<&str>,
+    alpha_mode: AlphaMode,
+    data_levels: DataLevels,
 ) -> NleResult<(String, Option<String>)> {
     let mut out = xml.to_string();
     let mut primary_info_id: Option<String> = None;
@@ -1531,8 +1538,8 @@ fn rewrite_media_pool_av_blobs(
             }
             block = replace_attr_first(&block, info_tag, "DbId", &new_info_id);
 
-            if info_tag == "BtVideoInfo"
-                && let Some(cs) = color_space {
+            if info_tag == "BtVideoInfo" {
+                if let Some(cs) = color_space {
                     let csl = cs.to_ascii_lowercase();
                     if csl.contains("pq") || csl.contains("2084") {
                         // Verified Resolve 21.2 10-bit BT.2100 PQ <Radiometry> protobuf
@@ -1542,6 +1549,13 @@ fn rewrite_media_pool_av_blobs(
                         block = set_child_text(&block, "Radiometry", RADIOMETRY_BT2100_PQ);
                     }
                 }
+                if (alpha_mode != AlphaMode::Default || data_levels != DataLevels::Auto)
+                    && let Some(rad_hex) = extract_tag_inner(&block, "Radiometry")
+                    && let Some(patched) = patch_bt_radiometry(&rad_hex, alpha_mode, data_levels)
+                {
+                    block = set_child_text(&block, "Radiometry", &patched);
+                }
+            }
 
             if let Some(clip_hex) = extract_tag_inner(&block, "Clip")
                 && let Ok(raw) = decode_wrapper_hex(&clip_hex)
@@ -1692,6 +1706,40 @@ fn patch_utf16_keyed_bytes(raw: &mut [u8], key: &str, value_type: u32, new_val: 
             raw[start..start + new_val.len()].copy_from_slice(new_val);
         }
     }
+}
+
+/// Patch Resolve 21.2 `BtVideoInfo/Radiometry` protobuf (`0x80` / `0x81`) with
+/// `AlphaMode` (`f6`: `1` = Premultiplied, `3` = Straight, omitted = None) and
+/// `DataLevels` (`f13`: `1` = Video, `2` = Full, omitted = Auto).
+fn patch_bt_radiometry(hex: &str, alpha_mode: AlphaMode, data_levels: DataLevels) -> Option<String> {
+    let raw = decode_flag_prefixed_hex(hex).ok()?;
+    let mut fields = decode_protobuf(&raw).ok()?;
+
+    let upsert_varint = |fields: &mut Vec<ProtoField>, num: u32, val: Option<u64>| {
+        fields.retain(|f| f.number != num);
+        if let Some(v) = val {
+            let pos = fields
+                .iter()
+                .position(|f| f.number > num)
+                .unwrap_or(fields.len());
+            fields.insert(pos, ProtoField::varint(num, v));
+        }
+    };
+
+    match alpha_mode {
+        AlphaMode::Premultiplied => upsert_varint(&mut fields, 6, Some(1)),
+        AlphaMode::Straight => upsert_varint(&mut fields, 6, Some(3)),
+        AlphaMode::None => upsert_varint(&mut fields, 6, None),
+        AlphaMode::Default => {}
+    }
+
+    match data_levels {
+        DataLevels::Video => upsert_varint(&mut fields, 13, Some(1)),
+        DataLevels::Full => upsert_varint(&mut fields, 13, Some(2)),
+        DataLevels::Auto => upsert_varint(&mut fields, 13, None),
+    }
+
+    Some(encode_flag_prefixed_hex(&encode_protobuf(&fields)))
 }
 
 /// Build Resolve 21.2 clip `<FieldsBlob>` encoding linked sibling DbIds (`f1.f1.f1`)

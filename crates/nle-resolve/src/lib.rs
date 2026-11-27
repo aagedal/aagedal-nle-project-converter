@@ -1158,4 +1158,121 @@ mod tests {
 
         let _ = std::fs::remove_file(&out_path);
     }
+
+    #[test]
+    fn roundtrips_clip_attributes_data_levels_and_alpha_mode() {
+        let mk_asset = |id: &str, name: &str, path: &str, alpha: AlphaMode, levels: DataLevels, cs: Option<&str>| MediaAsset {
+            id: id.into(),
+            name: name.into(),
+            path: path.into(),
+            media_kind: MediaKind::Video,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_25,
+            duration_frames: 100,
+            source_tc_frame: 0,
+            source_tc_string: "00:00:00:00".into(),
+            audio_channels: 2,
+            audio_sample_rate: 48_000,
+            color_space: cs.map(ToString::to_string),
+            video_codec: Some("ap4h".into()),
+            audio_codec: Some("Linear PCM".into()),
+            alpha_mode: alpha,
+            data_levels: levels,
+            pixel_aspect_ratio: None,
+            metadata: BTreeMap::new(),
+            custom_metadata: BTreeMap::new(),
+        };
+
+        let project = Project {
+            name: "ClipAttrsRoundtrip".into(),
+            source_format: NleFormat::PremierePro,
+            media_assets: vec![
+                mk_asset("m1", "FullStraightPQ.mov", "/Media/FullStraightPQ.mov", AlphaMode::Straight, DataLevels::Full, Some("Rec. 2100 PQ")),
+                mk_asset("m2", "VideoPremul.mov", "/Media/VideoPremul.mov", AlphaMode::Premultiplied, DataLevels::Video, None),
+                mk_asset("m3", "AutoNone.mov", "/Media/AutoNone.mov", AlphaMode::None, DataLevels::Auto, None),
+            ],
+            sequences: vec![Sequence {
+                id: "seq-1".into(),
+                name: "Main".into(),
+                kind: SequenceKind::Timeline,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 100,
+                start_tc_frame: 0,
+                mark_in: None,
+                mark_out: None,
+                video_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![Clip {
+                        id: "c1".into(),
+                        name: "FullStraightPQ.mov".into(),
+                        media_id: "m1".into(),
+                        media_path: "/Media/FullStraightPQ.mov".into(),
+                        media_kind: MediaKind::Video,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
+                        start_frame: 0,
+                        end_frame: 50,
+                        source_in_frame: 0,
+                        source_out_frame: 50,
+                        source_in_ticks: None,
+                        source_out_ticks: None,
+                        source_fps: Rational::FPS_25,
+                        source_width: 1920,
+                        source_height: 1080,
+                        speed_percent: 100.0,
+                        reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::Default,
+                        enabled: true,
+                        audio_channel: 0,
+                        link_group_id: None,
+                        label_name: None,
+                        label_preset_index: None,
+                        motion: MotionTransform::default(),
+                        opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
+                        lumetri_effects: vec![],
+                        effects: vec![],
+                        markers: vec![],
+                    }],
+                    transitions: vec![],
+                    markers: vec![],
+                }],
+                audio_tracks: vec![],
+                audio_buses: vec![],
+                markers: vec![],
+                metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_clip_attrs_roundtrip.drp");
+        write_drp_file(&project, &out_path, &ConversionOptions::default()).expect("write .drp");
+
+        let reread = read_drp_file(&out_path).expect("re-read .drp");
+        let a1 = reread.media_assets.iter().find(|a| a.name == "FullStraightPQ.mov").expect("m1");
+        assert_eq!(a1.alpha_mode, AlphaMode::Straight);
+        assert_eq!(a1.data_levels, DataLevels::Full);
+
+        let a2 = reread.media_assets.iter().find(|a| a.name == "VideoPremul.mov").expect("m2");
+        assert_eq!(a2.alpha_mode, AlphaMode::Premultiplied);
+        assert_eq!(a2.data_levels, DataLevels::Video);
+
+        let a3 = reread.media_assets.iter().find(|a| a.name == "AutoNone.mov").expect("m3");
+        assert_eq!(a3.alpha_mode, AlphaMode::Default);
+        assert_eq!(a3.data_levels, DataLevels::Auto);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
 }

@@ -151,11 +151,10 @@ fn primary_corrector(lumetri: &LumetriData) -> Vec<u8> {
     let mut params: BTreeMap<u64, f32> = BTreeMap::new();
 
     // 1. Saturation (Premiere 0..200 neutral 100 -> Resolve UI 0..100 neutral 50 -> DRX 0.0..2.0 neutral 1.0)
-    if let Some(sat) = lumetri.saturation {
-        if sat.is_finite() && (0.0..=200.0).contains(&sat) && (sat - 100.0).abs() > 1e-6 {
+    if let Some(sat) = lumetri.saturation
+        && sat.is_finite() && (0.0..=200.0).contains(&sat) && (sat - 100.0).abs() > 1e-6 {
             params.insert(DRX_SATURATION_ID, (sat / 100.0) as f32);
         }
-    }
 
     // 2. Lift wheel = Shadows Color Wheel + Basic Correction Blacks (DRX = ui * 2.0, neutral 0.0)
     let mut lift = [0.0f64; 4]; // R, G, B, Y in Resolve UI units
@@ -168,15 +167,14 @@ fn primary_corrector(lumetri: &LumetriData) -> Vec<u8> {
         lift[3] += dy;
         has_lift = true;
     }
-    if let Some(blacks) = lumetri.blacks {
-        if blacks.is_finite() && (-100.0..=100.0).contains(&blacks) && blacks.abs() > 1e-6 {
+    if let Some(blacks) = lumetri.blacks
+        && blacks.is_finite() && (-100.0..=100.0).contains(&blacks) && blacks.abs() > 1e-6 {
             let d = (blacks / 100.0) * BLACKS_TO_LIFT_SCALE;
             for ch in &mut lift {
                 *ch += d;
             }
             has_lift = true;
         }
-    }
     if has_lift && lift.iter().any(|v| v.abs() > 1e-6) {
         params.insert(DRX_LIFT_R_ID, (lift[0] * 2.0) as f32);
         params.insert(DRX_LIFT_G_ID, (lift[1] * 2.0) as f32);
@@ -195,24 +193,22 @@ fn primary_corrector(lumetri: &LumetriData) -> Vec<u8> {
         gain[3] += dy;
         has_gain = true;
     }
-    if let Some(exp) = lumetri.exposure {
-        if exp.is_finite() && (-5.0..=5.0).contains(&exp) && exp.abs() > 1e-6 {
+    if let Some(exp) = lumetri.exposure
+        && exp.is_finite() && (-5.0..=5.0).contains(&exp) && exp.abs() > 1e-6 {
             let mult = 2.0_f64.powf(exp / EXPOSURE_GAMMA);
             for ch in &mut gain {
                 *ch *= mult;
             }
             has_gain = true;
         }
-    }
-    if let Some(whites) = lumetri.whites {
-        if whites.is_finite() && (-100.0..=100.0).contains(&whites) && whites.abs() > 1e-6 {
+    if let Some(whites) = lumetri.whites
+        && whites.is_finite() && (-100.0..=100.0).contains(&whites) && whites.abs() > 1e-6 {
             let mult = (1.0 + (whites / 100.0) * WHITES_TO_GAIN_SCALE).max(0.05);
             for ch in &mut gain {
                 *ch *= mult;
             }
             has_gain = true;
         }
-    }
     if has_gain && gain.iter().any(|v| (v - 1.0).abs() > 1e-6) {
         params.insert(DRX_GAIN_R_ID, gain[0].clamp(0.01, 16.0) as f32);
         params.insert(DRX_GAIN_G_ID, gain[1].clamp(0.01, 16.0) as f32);
@@ -232,66 +228,58 @@ fn primary_corrector(lumetri: &LumetriData) -> Vec<u8> {
     }
 
     // 5. Offset RGB (preserved for Resolve round-trips, DRX = (ui - 25.0) / 25.0)
-    if let Some([or, og, ob]) = lumetri.offset_rgb {
-        if [or, og, ob].iter().all(|v| v.is_finite())
+    if let Some([or, og, ob]) = lumetri.offset_rgb
+        && [or, og, ob].iter().all(|v| v.is_finite())
             && [or, og, ob].iter().any(|v| v.abs() > 1e-6)
         {
             params.insert(DRX_OFFSET_R_ID, or.clamp(-4.0, 4.0) as f32);
             params.insert(DRX_OFFSET_G_ID, og.clamp(-4.0, 4.0) as f32);
             params.insert(DRX_OFFSET_B_ID, ob.clamp(-4.0, 4.0) as f32);
         }
-    }
 
     // 6. Contrast (Premiere -100..100 -> Resolve 0.5..1.5 neutral 1.0)
-    if let Some(con) = lumetri.contrast {
-        if con.is_finite() && (-100.0..=100.0).contains(&con) && con.abs() > 1e-6 {
+    if let Some(con) = lumetri.contrast
+        && con.is_finite() && (-100.0..=100.0).contains(&con) && con.abs() > 1e-6 {
             params.insert(
                 DRX_CONTRAST_ID,
                 (1.0 + con * CONTRAST_PREMIERE_TO_RESOLVE).clamp(0.0, 2.0) as f32,
             );
         }
-    }
 
     // 7. Primary adjustment bars: Highlights, Shadows, Color Boost (Vibrance), Mid/Detail (Sharpen), Temp, Tint
-    if let Some(hi) = lumetri.highlights {
-        if hi.is_finite() && hi.abs() > 1e-6 {
+    if let Some(hi) = lumetri.highlights
+        && hi.is_finite() && hi.abs() > 1e-6 {
             params.insert(
                 DRX_HIGHLIGHTS_ID,
                 (hi * SHADOWS_HIGHLIGHTS_SCALE).clamp(-100.0, 100.0) as f32,
             );
         }
-    }
-    if let Some(sh) = lumetri.shadows {
-        if sh.is_finite() && sh.abs() > 1e-6 {
+    if let Some(sh) = lumetri.shadows
+        && sh.is_finite() && sh.abs() > 1e-6 {
             params.insert(
                 DRX_SHADOWS_ID,
                 (sh * SHADOWS_HIGHLIGHTS_SCALE).clamp(-100.0, 100.0) as f32,
             );
         }
-    }
-    if let Some(vib) = lumetri.vibrance {
-        if vib.is_finite() && vib.abs() > 1e-6 {
+    if let Some(vib) = lumetri.vibrance
+        && vib.is_finite() && vib.abs() > 1e-6 {
             params.insert(DRX_COLOR_BOOST_ID, vib.clamp(-100.0, 100.0) as f32);
         }
-    }
-    if let Some(sharp) = lumetri.sharpen {
-        if sharp.is_finite() && sharp.abs() > 1e-6 {
+    if let Some(sharp) = lumetri.sharpen
+        && sharp.is_finite() && sharp.abs() > 1e-6 {
             params.insert(DRX_MID_DETAIL_ID, sharp.clamp(-100.0, 100.0) as f32);
         }
-    }
-    if let Some(temp) = lumetri.temperature {
-        if temp.is_finite() && temp.abs() > 1e-6 {
+    if let Some(temp) = lumetri.temperature
+        && temp.is_finite() && temp.abs() > 1e-6 {
             params.insert(
                 DRX_TEMP_ID,
                 (temp * TEMP_PREMIERE_TO_RESOLVE).clamp(-4000.0, 4000.0) as f32,
             );
         }
-    }
-    if let Some(tint) = lumetri.tint {
-        if tint.is_finite() && tint.abs() > 1e-6 {
+    if let Some(tint) = lumetri.tint
+        && tint.is_finite() && tint.abs() > 1e-6 {
             params.insert(DRX_TINT_ID, tint.clamp(-100.0, 100.0) as f32);
         }
-    }
 
     if params.is_empty() {
         return Vec::new();
@@ -573,11 +561,10 @@ pub fn parse_resolve_grade_nodes(body_hex: &str) -> Vec<LumetriData> {
         return Vec::new();
     };
     let Some(f1_bytes) = top.iter().find_map(|f| {
-        if f.number == 1 {
-            if let ProtoValue::Bytes(b) = &f.value {
+        if f.number == 1
+            && let ProtoValue::Bytes(b) = &f.value {
                 return Some(b.as_slice());
             }
-        }
         None
     }) else {
         return Vec::new();
@@ -744,7 +731,7 @@ fn parse_drx_primary_node(node_bytes: &[u8]) -> Option<(u64, LumetriData)> {
         let r = params.get(&DRX_GAIN_R_ID).copied().unwrap_or_else(|| y_raw.unwrap_or(1.0));
         let g = params.get(&DRX_GAIN_G_ID).copied().unwrap_or_else(|| y_raw.unwrap_or(1.0));
         let b = params.get(&DRX_GAIN_B_ID).copied().unwrap_or_else(|| y_raw.unwrap_or(1.0));
-        let y = y_raw.unwrap_or_else(|| LUMA_R * r + LUMA_G * g + LUMA_B * b);
+        let y = y_raw.unwrap_or(LUMA_R * r + LUMA_G * g + LUMA_B * b);
 
         let chroma_span = r.max(g).max(b) - r.min(g).min(b);
         if chroma_span < 1e-4 {
@@ -863,14 +850,13 @@ fn extract_primary_corrector_params(f9_bytes: &[u8]) -> BTreeMap<u64, f64> {
                             (2, ProtoValue::Bytes(vb)) => {
                                 if let Ok(vf) = decode_protobuf(&vb) {
                                     for vitem in vf {
-                                        if vitem.number == 1 {
-                                            if let ProtoValue::Fixed32(arr) = vitem.value {
+                                        if vitem.number == 1
+                                            && let ProtoValue::Fixed32(arr) = vitem.value {
                                                 let f = f32::from_le_bytes(arr) as f64;
                                                 if f.is_finite() {
                                                     val = Some(f);
                                                 }
                                             }
-                                        }
                                     }
                                 }
                             }
@@ -923,14 +909,13 @@ pub fn has_resolve_stabilization(body_hex: &str) -> bool {
                 let ProtoValue::Bytes(corr_bytes) = sf.value else {
                     continue;
                 };
-                if let Ok(corr_fields) = decode_protobuf(&corr_bytes) {
-                    if corr_fields
+                if let Ok(corr_fields) = decode_protobuf(&corr_bytes)
+                    && corr_fields
                         .iter()
                         .any(|cf| cf.number == 1 && matches!(cf.value, ProtoValue::Varint(DRX_STAB_CORRECTOR_ID)))
                     {
                         return true;
                     }
-                }
             }
         }
     }

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(
     name = "nle-convert",
-    about = "Direct open-source NLE project converter (Premiere Pro ↔ DaVinci Resolve, FCPXML, OTIO)"
+    version,
+    about = "Direct open-source NLE project converter (Premiere Pro ↔ DaVinci Resolve, Final Cut Pro, OTIO, FCP7 XML)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -182,10 +183,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target_format: target_fmt,
                     decisions: UserEffectDecisions { actions },
                 };
-                if let Some(parent) = preset_path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        std::fs::create_dir_all(parent)?;
-                    }
+                if let Some(parent) = preset_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&preset_path, serde_json::to_string_pretty(&preset)?)?;
                 if !json {

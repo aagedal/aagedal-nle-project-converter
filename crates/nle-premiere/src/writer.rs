@@ -59,11 +59,10 @@ pub fn write_prproj_file(
     let (xml, mut report) = build_prproj_xml(project, options)?;
     report.output_path = output_path.to_string_lossy().into_owned();
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
 
     let file = File::create(output_path)?;
     let mut encoder = GzEncoder::new(file, Compression::default());
@@ -276,11 +275,10 @@ impl<'a> PrprojBuilder<'a> {
             .filter(|s| s.kind == SequenceKind::Timeline)
             .filter_map(|s| self.seq_handles.get(&s.id).map(|h| h.seq_uid.clone()))
             .collect();
-        if open_seq_uids.is_empty() {
-            if let Some(first) = sequences.first().and_then(|s| self.seq_handles.get(&s.id)) {
+        if open_seq_uids.is_empty()
+            && let Some(first) = sequences.first().and_then(|s| self.seq_handles.get(&s.id)) {
                 open_seq_uids.push(first.seq_uid.clone());
             }
-        }
 
         // Build merged custom metadata schema (declared project schema + any asset/bin custom keys)
         let mut custom_schema = project.custom_metadata_schema.clone();
@@ -1521,11 +1519,9 @@ impl<'a> PrprojBuilder<'a> {
             trans_xml.push_str(&format!("\t\t\t\t\t<TrackItem Index=\"{i}\" ObjectRef=\"{id}\" />\n"));
         }
 
-        let mut props_xml = format!(
-            "\t\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n\
+        let mut props_xml = "\t\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n\
              \t\t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n\
-             \t\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n"
-        );
+             \t\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n".to_string();
         if track_idx == 0 {
             props_xml.push_str("\t\t\t\t\t\t<MZ.TrackTargeted>1</MZ.TrackTargeted>\n");
         }
@@ -1629,13 +1625,11 @@ impl<'a> PrprojBuilder<'a> {
             trans_xml.push_str(&format!("\t\t\t\t\t<TrackItem Index=\"{i}\" ObjectRef=\"{id}\" />\n"));
         }
 
-        let mut props_xml = format!(
-            "\t\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n\
+        let mut props_xml = "\t\t\t\t\t\t<TL.SQTrackExpanded>0</TL.SQTrackExpanded>\n\
              \t\t\t\t\t\t<TL.SQTrackExpandedHeight>41</TL.SQTrackExpandedHeight>\n\
              \t\t\t\t\t\t<TL.SQTrackAudioKeyframeStyle>0</TL.SQTrackAudioKeyframeStyle>\n\
              \t\t\t\t\t\t<TL.SQTrackShy>0</TL.SQTrackShy>\n\
-             \t\t\t\t\t\t<CM.KeyframeMode>true</CM.KeyframeMode>\n"
-        );
+             \t\t\t\t\t\t<CM.KeyframeMode>true</CM.KeyframeMode>\n".to_string();
         if track_idx == 0 {
             props_xml.push_str("\t\t\t\t\t\t<MZ.TrackTargeted>1</MZ.TrackTargeted>\n");
         }
@@ -1926,16 +1920,14 @@ impl<'a> PrprojBuilder<'a> {
             let mut out_idx: Option<usize> = None;
             let mut in_idx: Option<usize> = None;
             for (ci, clip) in track.clips.iter().enumerate() {
-                if clip.end_frame >= tr.start_frame && clip.end_frame <= tr.end_frame + 1 {
-                    if tr.alignment != "start" {
+                if clip.end_frame >= tr.start_frame && clip.end_frame <= tr.end_frame + 1
+                    && tr.alignment != "start" {
                         out_idx = Some(ci);
                     }
-                }
-                if clip.start_frame >= tr.start_frame - 1 && clip.start_frame <= tr.end_frame {
-                    if tr.alignment != "end" {
+                if clip.start_frame >= tr.start_frame - 1 && clip.start_frame <= tr.end_frame
+                    && tr.alignment != "end" {
                         in_idx = Some(ci);
                     }
-                }
             }
 
             let (has_out, has_in, alignment_ticks) = match (out_idx.is_some(), in_idx.is_some()) {
@@ -2352,8 +2344,8 @@ impl<'a> PrprojBuilder<'a> {
         clip: &Clip,
         kind: TrackKind,
     ) -> Option<(u64, String, u64, i64, Option<u32>)> {
-        if clip.source_kind != ClipSourceKind::Media {
-            if let Some(sh) = self.seq_handles.get(&clip.media_id).cloned() {
+        if clip.source_kind != ClipSourceKind::Media
+            && let Some(sh) = self.seq_handles.get(&clip.media_id).cloned() {
                 let src_id = if kind == TrackKind::Video {
                     sh.video_source_id
                 } else {
@@ -2370,7 +2362,6 @@ impl<'a> PrprojBuilder<'a> {
                 let empty_markers = self.emit_markers(&[], Rational::FPS_25);
                 return Some((src_id, sh.master_clip_uid, empty_markers, 0, angle_idx));
             }
-        }
 
         let handle = self
             .media_by_id
@@ -2420,11 +2411,10 @@ impl<'a> PrprojBuilder<'a> {
             String::new()
         };
 
-        if let (Some(in_t), Some(out_t)) = (clip.source_in_ticks, clip.source_out_ticks) {
-            if out_t > in_t {
+        if let (Some(in_t), Some(out_t)) = (clip.source_in_ticks, clip.source_out_ticks)
+            && out_t > in_t {
                 return (in_t, out_t, speed_xml, reverse_xml);
             }
-        }
 
         let source_span = ((timeline_dur_ticks as f64) * speed_factor).round().max(1.0) as i64;
         let raw_in_ticks = seq_fps.frames_to_adobe_ticks(clip.source_in_frame.max(0));
@@ -2639,14 +2629,13 @@ impl<'a> PrprojBuilder<'a> {
         let mut temp = lum.temperature.unwrap_or(0.0);
         let mut tint = lum.tint.unwrap_or(0.0);
         let mut exp = lum.exposure.unwrap_or(0.0);
-        if let Some([or, og, ob]) = lum.offset_rgb {
-            if [or, og, ob].iter().all(|v| v.is_finite()) {
+        if let Some([or, og, ob]) = lum.offset_rgb
+            && [or, og, ob].iter().all(|v| v.is_finite()) {
                 let oy = 0.2126 * or + 0.7152 * og + 0.0722 * ob;
                 exp = (exp + oy * 1.2).clamp(-5.0, 5.0);
                 temp = (temp + (or - ob) * 120.0).clamp(-100.0, 100.0);
                 tint = (tint + ((or + ob) * 0.5 - og) * 120.0).clamp(-100.0, 100.0);
             }
-        }
         if lum.temperature.is_some() || temp.abs() > 1e-6 {
             params.push(self.emit_float_param("Temperature", 7, temp, -100.0, 100.0, None, None));
         }
@@ -2977,18 +2966,16 @@ impl<'a> PrprojBuilder<'a> {
                     items.extend(sub.iter().cloned());
                 }
                 for path in &bin.media_paths {
-                    if let Some(mh) = self.media_by_path.get(path) {
-                        if placed_cpis.insert(mh.clip_project_item_uid.clone()) {
+                    if let Some(mh) = self.media_by_path.get(path)
+                        && placed_cpis.insert(mh.clip_project_item_uid.clone()) {
                             items.push(mh.clip_project_item_uid.clone());
                         }
-                    }
                 }
                 for sid in &bin.sequence_ids {
-                    if let Some(sh) = self.seq_handles.get(sid) {
-                        if placed_cpis.insert(sh.clip_project_item_uid.clone()) {
+                    if let Some(sh) = self.seq_handles.get(sid)
+                        && placed_cpis.insert(sh.clip_project_item_uid.clone()) {
                             items.push(sh.clip_project_item_uid.clone());
                         }
-                    }
                 }
                 self.emit_bin_item(&buid, &bin.name, &items, &bin.custom_metadata);
                 report.bins_created += 1;
@@ -2997,11 +2984,10 @@ impl<'a> PrprojBuilder<'a> {
 
         // Place any remaining unbinned sequences and media items directly in Root Bin
         for seq in sequences {
-            if let Some(sh) = self.seq_handles.get(&seq.id) {
-                if placed_cpis.insert(sh.clip_project_item_uid.clone()) {
+            if let Some(sh) = self.seq_handles.get(&seq.id)
+                && placed_cpis.insert(sh.clip_project_item_uid.clone()) {
                     root_items.push(sh.clip_project_item_uid.clone());
                 }
-            }
         }
         let mut media_cpis: Vec<String> = self
             .media_by_id

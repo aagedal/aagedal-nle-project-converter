@@ -101,11 +101,10 @@ pub fn write_fcpxml_file(
                 res.ensure_transition_effect(tr);
             }
         }
-        if let Some(a1) = seq.audio_tracks.first() {
-            if !a1.transitions.is_empty() {
+        if let Some(a1) = seq.audio_tracks.first()
+            && !a1.transitions.is_empty() {
                 res.ensure_audio_transition_effect();
             }
-        }
     }
     if options.include_unused_media {
         for asset in &project.media_assets {
@@ -198,11 +197,10 @@ pub fn write_fcpxml_file(
     xml.push_str("  </library>\n");
     xml.push_str("</fcpxml>\n");
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
     fs::write(output_path, xml)?;
 
     Ok(ConversionReport {
@@ -1488,22 +1486,20 @@ fn write_transition_element(
         off.to_fcpxml_string(),
         dur.to_fcpxml_string()
     ));
-    if let Some(vtr) = video_tr {
-        if let Some((fx_rid, fx_name)) = res.transition_effect_id(vtr) {
+    if let Some(vtr) = video_tr
+        && let Some((fx_rid, fx_name)) = res.transition_effect_id(vtr) {
             xml.push_str(&format!(
                 "{pad}  <filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
                 xml_escape(fx_name)
             ));
         }
-    }
-    if include_audio {
-        if let Some((fx_rid, fx_name)) = res.audio_transition_effect_id() {
+    if include_audio
+        && let Some((fx_rid, fx_name)) = res.audio_transition_effect_id() {
             xml.push_str(&format!(
                 "{pad}  <filter-audio ref=\"{fx_rid}\" name=\"{}\"/>\n",
                 xml_escape(fx_name)
             ));
         }
-    }
     xml.push_str(&format!("{pad}</transition>\n"));
 }
 
@@ -1568,8 +1564,8 @@ fn extract_fcp_filter_uid(eff: &nle_core::EffectInstance) -> Option<&str> {
     {
         return Some(m);
     }
-    if let Some(rest) = m.strip_prefix("fcp.") {
-        if let Some((_, uid)) = rest.split_once(':') {
+    if let Some(rest) = m.strip_prefix("fcp.")
+        && let Some((_, uid)) = rest.split_once(':') {
             let u = uid.trim();
             if u.starts_with("FxPlug:")
                 || u.starts_with("~/Effects.localized/")
@@ -1579,7 +1575,6 @@ fn extract_fcp_filter_uid(eff: &nle_core::EffectInstance) -> Option<&str> {
                 return Some(u);
             }
         }
-    }
     None
 }
 

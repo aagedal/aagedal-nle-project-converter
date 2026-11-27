@@ -38,7 +38,7 @@ pub fn decode_virtual_audio_track(hex: &str) -> Option<(u32, u32)> {
         }
     }
 
-    let ch_count = channel_count.or_else(|| match audio_type {
+    let ch_count = channel_count.or(match audio_type {
         Some(1) => Some(1),
         Some(0) => Some(2),
         _ => None,
@@ -154,11 +154,10 @@ pub fn decode_fairlight_mixer(fields_blob: &[u8]) -> Option<FairlightMixerData> 
     let bus_names: Vec<String> = bus_rows
         .iter()
         .find_map(|(f, _, v)| {
-            if *f == 0xBC {
-                if let RowValues::Names(names) = v {
+            if *f == 0xBC
+                && let RowValues::Names(names) = v {
                     return Some(names.clone());
                 }
-            }
             None
         })
         .unwrap_or_default();
@@ -169,11 +168,10 @@ pub fn decode_fairlight_mixer(fields_blob: &[u8]) -> Option<FairlightMixerData> 
     let bus_is_main: Vec<u32> = bus_rows
         .iter()
         .find_map(|(f, _, v)| {
-            if *f == 0xAA {
-                if let RowValues::Ints(ints) = v {
+            if *f == 0xAA
+                && let RowValues::Ints(ints) = v {
                     return Some(ints.clone());
                 }
-            }
             None
         })
         .unwrap_or_default();
@@ -181,11 +179,10 @@ pub fn decode_fairlight_mixer(fields_blob: &[u8]) -> Option<FairlightMixerData> 
     let bus_parent_idx: Vec<u32> = bus_rows
         .iter()
         .find_map(|(f, _, v)| {
-            if *f == 0x40B {
-                if let RowValues::Ints(ints) = v {
+            if *f == 0x40B
+                && let RowValues::Ints(ints) = v {
                     return Some(ints.clone());
                 }
-            }
             None
         })
         .unwrap_or_default();
@@ -213,27 +210,24 @@ pub fn decode_fairlight_mixer(fields_blob: &[u8]) -> Option<FairlightMixerData> 
     }
 
     let tr_ids = track_rows.iter().find_map(|(f, _, v)| {
-        if *f == 0x458 {
-            if let RowValues::Ints(ints) = v {
+        if *f == 0x458
+            && let RowValues::Ints(ints) = v {
                 return Some(ints.clone());
             }
-        }
         None
     });
     let tr_bus = track_rows.iter().find_map(|(f, _, v)| {
-        if *f == 0x40B {
-            if let RowValues::Ints(ints) = v {
+        if *f == 0x40B
+            && let RowValues::Ints(ints) = v {
                 return Some(ints.clone());
             }
-        }
         None
     });
     let tr_width = track_rows.iter().find_map(|(f, _, v)| {
-        if *f == 0xBA {
-            if let RowValues::Ints(ints) = v {
+        if *f == 0xBA
+            && let RowValues::Ints(ints) = v {
                 return Some(ints.clone());
             }
-        }
         None
     });
 
@@ -245,20 +239,16 @@ pub fn decode_fairlight_mixer(fields_blob: &[u8]) -> Option<FairlightMixerData> 
                 continue;
             }
             let tid_usize = tid as usize;
-            if let Some(ref widths) = tr_width {
-                if let Some(&w) = widths.get(ch_idx) {
-                    if w > 0 {
+            if let Some(ref widths) = tr_width
+                && let Some(&w) = widths.get(ch_idx)
+                    && w > 0 {
                         track_channels.insert(tid_usize, w);
                     }
-                }
-            }
-            if let Some(ref b_assign) = tr_bus {
-                if let Some(&bidx) = b_assign.get(ch_idx) {
-                    if bidx != 0xFFFF_FFFF && (bidx as usize) < buses.len() {
+            if let Some(ref b_assign) = tr_bus
+                && let Some(&bidx) = b_assign.get(ch_idx)
+                    && bidx != 0xFFFF_FFFF && (bidx as usize) < buses.len() {
                         track_bus_ids.insert(tid_usize, format!("bus-{bidx}"));
                     }
-                }
-            }
         }
     }
 
@@ -296,7 +286,7 @@ pub fn rebuild_fairlight_track_model(
         return Err(NleError::InvalidFormat("FLStudioModelBA decompressed size mismatch".into()));
     }
 
-    let default_buses = vec![FairlightBusSpec {
+    let default_buses = [FairlightBusSpec {
         name: "Bus 1".to_string(),
         is_main: true,
         parent_bus_index: None,
@@ -367,9 +357,11 @@ fn find_table_start(data: &[u8], from: usize, section_id: u32) -> Option<usize> 
     None
 }
 
-fn parse_columnar_table(data: &[u8], start: usize) -> NleResult<(usize, Vec<(u32, u32, RowValues)>)> {
+type ColumnarRow = (u32, u32, RowValues);
+
+fn parse_columnar_table(data: &[u8], start: usize) -> NleResult<(usize, Vec<ColumnarRow>)> {
     let mut offset = start;
-    let mut rows: Vec<(u32, u32, RowValues)> = Vec::new();
+    let mut rows: Vec<ColumnarRow> = Vec::new();
     while offset + 12 <= data.len() {
         let flag = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
         if flag == 0 {

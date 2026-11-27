@@ -4254,7 +4254,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nle-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "clap",
  "nle-core",
@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "nle-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4276,7 +4276,7 @@ dependencies = [
 
 [[package]]
 name = "nle-effects"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "nle-core",
  "roxmltree 0.20.0",
@@ -4286,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "nle-gui"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "dirs 6.0.0",
  "gpui-kit",
@@ -4305,7 +4305,7 @@ dependencies = [
 
 [[package]]
 name = "nle-interchange"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "nle-core",
  "roxmltree 0.20.0",
@@ -4316,7 +4316,7 @@ dependencies = [
 
 [[package]]
 name = "nle-premiere"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -4328,7 +4328,7 @@ dependencies = [
 
 [[package]]
 name = "nle-resolve"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "flate2",
  "nle-core",

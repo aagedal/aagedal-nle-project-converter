@@ -311,8 +311,8 @@ impl EventGraph {
             return Vec::new();
         };
         for &cid in direct {
-            if let Some(node) = self.nodes.get(&cid) {
-                if node.zname == relation_name {
+            if let Some(node) = self.nodes.get(&cid)
+                && node.zname == relation_name {
                     let raw_children = self.children.get(&cid).cloned().unwrap_or_default();
                     // If this NSArray carries an explicit `$order` UUID array, sort children by it!
                     if let Some(order_ids) = node
@@ -323,22 +323,19 @@ impl EventGraph {
                     {
                         let mut by_ident: HashMap<&str, i64> = HashMap::new();
                         for &item_pk in &raw_children {
-                            if let Some(item) = self.nodes.get(&item_pk) {
-                                if !item.zident.is_empty() {
+                            if let Some(item) = self.nodes.get(&item_pk)
+                                && !item.zident.is_empty() {
                                     by_ident.insert(item.zident.as_str(), item_pk);
                                 }
-                            }
                         }
                         let mut ordered = Vec::with_capacity(raw_children.len());
                         let mut used = HashSet::new();
                         for oid in order_ids {
-                            if let Some(s) = oid.as_str() {
-                                if let Some(&pk) = by_ident.get(s) {
-                                    if used.insert(pk) {
+                            if let Some(s) = oid.as_str()
+                                && let Some(&pk) = by_ident.get(s)
+                                    && used.insert(pk) {
                                         ordered.push(pk);
                                     }
-                                }
-                            }
                         }
                         for pk in raw_children {
                             if used.insert(pk) {
@@ -349,7 +346,6 @@ impl EventGraph {
                     }
                     return raw_children;
                 }
-            }
         }
         Vec::new()
     }
@@ -392,18 +388,15 @@ fn read_event_assets(event_db_path: &Path, event_dir: &Path) -> NleResult<Vec<Bu
     // Collect videoProps from FFAnchoredCollection nodes in the event (for assets whose videoFormatName is empty, e.g. vertical iPhone clips!)
     let mut props_by_name: HashMap<String, (u32, u32, Rational, Option<String>)> = HashMap::new();
     for node in graph.nodes.values() {
-        if node.ztype == "FFAnchoredCollection" {
-            if let Some(pl) = &node.plist {
-                if let (Some(name), Some(vp)) = (
+        if node.ztype == "FFAnchoredCollection"
+            && let Some(pl) = &node.plist
+                && let (Some(name), Some(vp)) = (
                     pl.get("displayName").and_then(PlistValue::as_str),
                     pl.get("videoProps"),
-                ) {
-                    if let Some(parsed) = parse_video_props(vp) {
+                )
+                    && let Some(parsed) = parse_video_props(vp) {
                         props_by_name.insert(name.to_string(), parsed);
                     }
-                }
-            }
-        }
     }
 
     let mut out = Vec::new();
@@ -837,26 +830,23 @@ fn parse_bundle_item(
                     has_audio_comp = true;
                 }
                 for &ref_pk in &graph.named_child_items(comp_pk, "media") {
-                    if let Some(ref_node) = graph.nodes.get(&ref_pk) {
-                        if let Some(mid) = ref_node
+                    if let Some(ref_node) = graph.nodes.get(&ref_pk)
+                        && let Some(mid) = ref_node
                             .plist
                             .as_ref()
                             .and_then(|p| p.get("mediaIdentifier"))
                             .and_then(PlistValue::as_str)
-                        {
-                            if primary_asset_id.is_none() {
+                            && primary_asset_id.is_none() {
                                 primary_asset_id = Some(mid.to_string());
                             }
-                        }
-                    }
                 }
                 // Component-level effectStack (e.g., FFStabilizationEffect lives on v1 component!)
                 extra_effect_stacks.extend(graph.named_child_items(comp_pk, "effectStack"));
 
                 // Embedded audio components anchored inside v1
                 for &anc_pk in &graph.named_child_items(comp_pk, "anchoredItems") {
-                    if let Some(anc) = graph.nodes.get(&anc_pk) {
-                        if anc.ztype == "FFAnchoredMediaComponent" {
+                    if let Some(anc) = graph.nodes.get(&anc_pk)
+                        && anc.ztype == "FFAnchoredMediaComponent" {
                             let ak = anc
                                 .plist
                                 .as_ref()
@@ -867,7 +857,6 @@ fn parse_bundle_item(
                                 has_audio_comp = true;
                             }
                         }
-                    }
                 }
             }
 
@@ -1225,12 +1214,10 @@ fn extract_bundle_retiming(
         .get("rate")
         .or_else(|| clip_pl.get("speed"))
         .and_then(PlistValue::as_f64)
-    {
-        if rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
+        && rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
             let pct = if rate.abs() <= 20.0 { rate * 100.0 } else { rate };
             return (pct, pct < 0.0, Vec::new());
         }
-    }
 
     // 2. Inspect child timeMap / FFTimeMap nodes (if present)
     let mut tm_pks = graph.named_child_items(clip_pk, "timeMap");
@@ -1265,14 +1252,13 @@ fn extract_bundle_retiming(
                     .and_then(FcpTime::parse)
                     .map(|ft| ft.num as f64 / ft.den.max(1) as f64)
                     .or_else(|| pt.get("value").and_then(PlistValue::as_f64));
-                if let (Some(timeline_sec), Some(source_sec)) = (t, v) {
-                    if timeline_sec.is_finite() && source_sec.is_finite() {
+                if let (Some(timeline_sec), Some(source_sec)) = (t, v)
+                    && timeline_sec.is_finite() && source_sec.is_finite() {
                         pts.push(SpeedKeyframe {
                             timeline_sec,
                             source_sec,
                         });
                     }
-                }
             }
             if pts.len() >= 2 {
                 let dt = pts.last().unwrap().timeline_sec - pts[0].timeline_sec;
@@ -1284,12 +1270,11 @@ fn extract_bundle_retiming(
                 }
             }
         }
-        if let Some(rate) = tpl.get("rate").and_then(PlistValue::as_f64) {
-            if rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
+        if let Some(rate) = tpl.get("rate").and_then(PlistValue::as_f64)
+            && rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
                 let pct = if rate.abs() <= 20.0 { rate * 100.0 } else { rate };
                 return (pct, pct < 0.0, Vec::new());
             }
-        }
     }
 
     let _ = clipped_dur;
@@ -1511,11 +1496,10 @@ fn parse_ozml_transform(
 
     if let Some(sx) = scale_x {
         motion.scale = sx * 100.0;
-        if let Some(sy) = scale_y {
-            if (sx - sy).abs() > 1e-4 {
+        if let Some(sy) = scale_y
+            && (sx - sy).abs() > 1e-4 {
                 motion.scale_y = Some(sy * 100.0);
             }
-        }
     }
 }
 

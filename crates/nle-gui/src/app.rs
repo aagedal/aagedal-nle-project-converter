@@ -16,11 +16,18 @@ use nle_core::{
     ConversionOptions, ConversionReport, NleFormat, PathRelinkRule, SequenceKind, Severity,
 };
 use nle_effects::{
-    analyze_project_effects, DetectedEffectGroup, EffectMappingPreset, MappingAction,
-    MappingFidelity, UserEffectDecisions,
+    analyze_project_effects, DetectedEffectGroup, EffectMappingPreset, InstalledPluginRegistry,
+    MappingAction, MappingFidelity, UserEffectDecisions,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BulkEffectMode {
+    Recommended,
+    MarkerOnly,
+    SkipAll,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TargetFormatItem {
@@ -146,6 +153,10 @@ impl ConverterApp {
             InputState::new(window, cx).placeholder("To prefix (e.g. /Volumes/Edit)")
         });
 
+        let relink_from_obs = cx.observe(&relink_from, |_, _, cx| {
+            cx.notify();
+        });
+
         let target_sub = cx.subscribe_in(
             &target_select,
             window,
@@ -175,7 +186,7 @@ impl ConverterApp {
             relink_from,
             relink_to,
             effect_selects: BTreeMap::new(),
-            _base_subscriptions: vec![target_sub],
+            _base_subscriptions: vec![target_sub, relink_from_obs],
             effect_subscriptions: Vec::new(),
             busy: false,
             busy_label: None,
@@ -226,14 +237,48 @@ impl ConverterApp {
         let seqs: Vec<String> = self.selected_seq_ids.iter().cloned().collect();
         let new_plan = analyze_project_effects(&loaded.project, &seqs, self.target_format);
 
+        // Preserve existing user decisions whenever the saved action is still valid for the new plan
+        // (e.g. toggling a sequence checkbox no longer wipes customized mappings).
         let mut next_actions = BTreeMap::new();
         for fx in &new_plan.effects {
-            next_actions.insert(fx.key.clone(), fx.default_action.clone());
+            let valid_items = effect_action_items(fx);
+            let chosen = self
+                .decisions
+                .get(&fx.key)
+                .filter(|prev| valid_items.iter().any(|item| &item.action == *prev))
+                .cloned()
+                .unwrap_or_else(|| fx.default_action.clone());
+            next_actions.insert(fx.key.clone(), chosen);
         }
 
         self.decisions = next_actions;
         loaded.effect_plan = new_plan;
         self.rebuild_effect_selects(window, cx);
+        cx.notify();
+    }
+
+    fn apply_bulk_effect_action(
+        &mut self,
+        mode: BulkEffectMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(loaded) = self.loaded.as_ref() else {
+            return;
+        };
+        for fx in &loaded.effect_plan.effects {
+            let action = match mode {
+                BulkEffectMode::Recommended => fx.default_action.clone(),
+                BulkEffectMode::MarkerOnly => MappingAction::PlaceMarkerOnly,
+                BulkEffectMode::SkipAll => MappingAction::Skip,
+            };
+            if let Some(sel) = self.effect_selects.get(&fx.key) {
+                sel.update(cx, |state, cx| {
+                    state.set_selected_value(&action, window, cx);
+                });
+            }
+            self.decisions.insert(fx.key.clone(), action);
+        }
         cx.notify();
     }
 
@@ -550,15 +595,21 @@ impl ConverterApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(preset) => {
+                        let total_detected = this.effect_selects.len();
+                        let mut matched = 0usize;
                         for (k, v) in preset.decisions.actions {
                             if let Some(sel) = this.effect_selects.get(&k) {
+                                matched += 1;
                                 sel.update(cx, |state, cx| {
                                     state.set_selected_value(&v, window, cx);
                                 });
                             }
                             this.decisions.insert(k, v);
                         }
-                        this.status_toast = Some(format!("Loaded preset: {}", preset.name));
+                        this.status_toast = Some(format!(
+                            "Loaded preset '{}' ({matched} of {total_detected} detected effects matched)",
+                            preset.name
+                        ));
                     }
                     Err(err) => {
                         this.error_msg = Some(err);
@@ -709,6 +760,26 @@ impl ConverterApp {
     }
 
     fn render_hero(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cross_plugins = InstalledPluginRegistry::system().grouped_plugins(2);
+        let cross_plugin_pill = if cross_plugins.is_empty() {
+            None
+        } else {
+            let names: Vec<&str> = cross_plugins.iter().take(3).map(|p| p.name.as_str()).collect();
+            let suffix = if cross_plugins.len() > 3 {
+                format!(" +{} more", cross_plugins.len() - 3)
+            } else {
+                String::new()
+            };
+            Some(theme::pill(
+                format!(
+                    "{} Cross-NLE Plugins Installed ({}{suffix})",
+                    cross_plugins.len(),
+                    names.join(", ")
+                ),
+                PillTone::Green,
+            ))
+        };
+
         div()
             .w_full()
             .flex()
@@ -789,7 +860,8 @@ impl ConverterApp {
                             .child(theme::pill(
                                 "100% Local · Free & Open Source",
                                 PillTone::Green,
-                            )),
+                            ))
+                            .when_some(cross_plugin_pill, |row, p| row.child(p)),
                     ),
             )
     }
@@ -861,6 +933,35 @@ impl ConverterApp {
                     .child(
                         h_flex()
                             .gap(px(8.))
+                            .when(!rep.messages.is_empty(), |row| {
+                                let log_text = rep
+                                    .messages
+                                    .iter()
+                                    .map(|m| {
+                                        let prefix = match (&m.sequence, &m.clip) {
+                                            (Some(s), Some(c)) => format!("[{s} · {c}] "),
+                                            (Some(s), None) => format!("[{s}] "),
+                                            _ => String::new(),
+                                        };
+                                        format!("[{:?}] {}{} ({})", m.severity, prefix, m.message, m.code)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                row.child(
+                                    Button::new("report-copy-log")
+                                        .small()
+                                        .label("Copy Log")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                log_text.clone(),
+                                            ));
+                                            this.status_toast = Some(
+                                                "Copied conversion log to clipboard".to_string(),
+                                            );
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("report-reveal")
                                     .primary()
@@ -1298,6 +1399,11 @@ impl ConverterApp {
                     })),
             );
 
+        let relink_from_val = self.relink_from.read(cx).value().to_string();
+        let relink_has_input = !relink_from_val.trim().is_empty();
+        let (relink_matched, relink_total) =
+            backend::count_matching_relink_paths(&loaded.project, &relink_from_val);
+
         let relink_panel = v_flex()
             .w_full()
             .bg(rgb(theme::SURFACE))
@@ -1308,11 +1414,28 @@ impl ConverterApp {
             .py(px(16.))
             .gap(px(10.))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::TEXT))
-                    .child("Media Path Relinker (Optional)"),
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::TEXT))
+                            .child("Media Path Relinker (Optional)"),
+                    )
+                    .when(relink_has_input, |hdr| {
+                        hdr.child(
+                            Button::new("relink-clear")
+                                .small()
+                                .label("Clear")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.relink_from.update(cx, |s, cx| s.set_value("", window, cx));
+                                    this.relink_to.update(cx, |s, cx| s.set_value("", window, cx));
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1326,7 +1449,21 @@ impl ConverterApp {
                     .gap(px(8.))
                     .child(div().flex_1().child(Input::new(&self.relink_from)))
                     .child(div().flex_1().child(Input::new(&self.relink_to))),
-            );
+            )
+            .when(relink_has_input, |panel| {
+                let (color, label) = if relink_matched > 0 {
+                    (
+                        rgb(theme::GREEN_TEXT),
+                        format!("{relink_matched} of {relink_total} media paths match this prefix"),
+                    )
+                } else {
+                    (
+                        rgb(theme::AMBER_TEXT),
+                        format!("0 of {relink_total} media paths match this prefix"),
+                    )
+                };
+                panel.child(div().text_xs().text_color(color).child(label))
+            });
 
         let left_column = v_flex()
             .w(px(380.))
@@ -1471,6 +1608,23 @@ impl ConverterApp {
             v_flex().w_full().gap(px(10.)).children(cards).into_any_element()
         };
 
+        let cross_plugins = InstalledPluginRegistry::system().grouped_plugins(2);
+        let installed_plugin_banner = if cross_plugins.is_empty() {
+            None
+        } else {
+            let names: Vec<&str> = cross_plugins.iter().take(4).map(|p| p.name.as_str()).collect();
+            let more = if cross_plugins.len() > 4 {
+                format!(" +{} more", cross_plugins.len() - 4)
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "Cross-NLE third-party plugins detected on this machine ({}): {}{more}",
+                cross_plugins.len(),
+                names.join(", ")
+            ))
+        };
+
         let right_column = v_flex()
             .flex_1()
             .min_w_0()
@@ -1502,8 +1656,16 @@ impl ConverterApp {
                                 div()
                                     .text_xs()
                                     .text_color(rgb(theme::MUTED))
-                                    .child("App-exclusive effects are detected automatically so you can choose corresponding target NLE equivalents or place annotated review markers."),
-                            ),
+                                    .child("App-exclusive effects and third-party plugins are detected automatically — matching plugins installed for the target NLE are matched and attached directly where supported."),
+                            )
+                            .when_some(installed_plugin_banner, |col, txt| {
+                                col.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(theme::CYAN_TEXT))
+                                        .child(txt),
+                                )
+                            }),
                     )
                     .child(
                         h_flex()
@@ -1529,20 +1691,69 @@ impl ConverterApp {
             )
             .child(
                 h_flex()
+                    .items_center()
+                    .justify_between()
                     .flex_wrap()
                     .gap(px(8.))
-                    .child(theme::pill(
-                        format!("{} Ask User / Suggested", plan.needs_user_review_count),
-                        PillTone::Amber,
-                    ))
-                    .child(theme::pill(
-                        format!("{} Unmapped / 3rd Party", plan.unmapped_count),
-                        PillTone::Red,
-                    ))
-                    .child(theme::pill(
-                        format!("{} Native Auto-Convert", plan.native_auto_count),
-                        PillTone::Green,
-                    )),
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .child(theme::pill(
+                                format!("{} Ask User / Suggested", plan.needs_user_review_count),
+                                PillTone::Amber,
+                            ))
+                            .child(theme::pill(
+                                format!("{} Unmapped / 3rd Party", plan.unmapped_count),
+                                PillTone::Red,
+                            ))
+                            .child(theme::pill(
+                                format!("{} Native Auto-Convert", plan.native_auto_count),
+                                PillTone::Green,
+                            )),
+                    )
+                    .when(!plan.effects.is_empty(), |row| {
+                        row.child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(
+                                    Button::new("fx-bulk-recommended")
+                                        .small()
+                                        .label("Recommended")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.apply_bulk_effect_action(
+                                                BulkEffectMode::Recommended,
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .child(
+                                    Button::new("fx-bulk-markers")
+                                        .small()
+                                        .label("All → Markers")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.apply_bulk_effect_action(
+                                                BulkEffectMode::MarkerOnly,
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .child(
+                                    Button::new("fx-bulk-skip")
+                                        .small()
+                                        .label("Skip All")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.apply_bulk_effect_action(
+                                                BulkEffectMode::SkipAll,
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                ),
+                        )
+                    }),
             )
             .child(fx_body);
 

@@ -437,6 +437,9 @@ fn expand_container_clip(
             flat.reversed = composed_reversed;
             flat.enabled = outer.enabled && inner.enabled;
             flat.opacity = composed_opacity;
+            if flat.blend_mode.is_normal() && !outer.blend_mode.is_normal() {
+                flat.blend_mode = outer.blend_mode;
+            }
             flat.motion = composed_motion;
             flat.effects = composed_effects;
             flat.lumetri_effects = composed_lumetri;
@@ -525,7 +528,7 @@ fn source_kind_label(kind: ClipSourceKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MediaKind, MotionTransform, RetimeInterpolation};
+    use crate::model::{BlendMode, MediaKind, MotionTransform, RetimeInterpolation};
     use std::collections::BTreeMap;
 
     fn make_media_clip(
@@ -565,6 +568,7 @@ mod tests {
             label_preset_index: None,
             motion: MotionTransform::default(),
             opacity: 100.0,
+            blend_mode: BlendMode::Normal,
             lumetri_effects: Vec::new(),
             effects: Vec::new(),
             markers: Vec::new(),

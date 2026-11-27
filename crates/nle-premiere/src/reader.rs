@@ -1,10 +1,11 @@
 use crate::lumetri::{child_text, find_descendant, nested_text, parse_keyframe_scalar, parse_lumetri_component};
 use flate2::read::GzDecoder;
 use nle_core::{
-    frames_to_timecode, AlphaMode, AudioBus, Clip, ClipSourceKind, ColorConfig, DataLevels,
-    EffectCategory, EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset,
-    MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader,
-    Rational, RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, AlphaMode, AudioBus, BlendMode, Clip, ClipSourceKind, ColorConfig,
+    DataLevels, EffectCategory, EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope,
+    MediaAsset, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin,
+    ProjectReader, Rational, RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind,
+    Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -1353,6 +1354,7 @@ fn parse_clip(
     let mut audio_channel = 1u32;
     let mut label_name: Option<String> = None;
     let mut label_preset_index: Option<u8> = None;
+    let mut clip_markers: Vec<Marker> = Vec::new();
 
     if let Some(sc_el) = cti
         .children()
@@ -1481,6 +1483,12 @@ fn parse_clip(
             }
 
             if let Some(inner) = clip_el.children().find(|n| n.has_tag_name("Clip")) {
+                clip_markers = parse_marker_owner(
+                    inner.children().find(|n| n.has_tag_name("MarkerOwner")),
+                    by_id,
+                    seq_fps,
+                    MarkerScope::Clip,
+                );
                 if let Some(ip) = child_text(inner, "InPoint").and_then(|s| s.trim().parse::<i64>().ok()) {
                     source_in_ticks = Some(ip);
                     source_in_frame = seq_fps.adobe_ticks_to_frames(ip);
@@ -1600,6 +1608,7 @@ fn parse_clip(
     // Extract components (Motion, Opacity, Lumetri, and ALL other video/audio effects!)
     let mut motion = MotionTransform::default();
     let mut opacity = 100.0f64;
+    let mut blend_mode = BlendMode::Normal;
     let mut lumetri_effects: Vec<LumetriData> = Vec::new();
     let mut effects: Vec<EffectInstance> = Vec::new();
 
@@ -1650,21 +1659,42 @@ fn parse_clip(
                 }
                 if lower.contains("adbe opacity") {
                     let params = extract_effect_params(component, by_id);
-                    let mut is_nondefault = false;
+                    let mut has_animated = false;
+                    let mut p2_code: Option<i64> = None;
+                    let mut p3_code: Option<i64> = None;
                     for p in &params {
-                        if p.id == "1" {
-                            if let Ok(val) = p.value.parse::<f64>() {
-                                opacity = val;
-                                if (val - 100.0).abs() > 1e-3 {
-                                    is_nondefault = true;
+                        match p.id.as_str() {
+                            "1" => {
+                                if let Ok(val) = p.value.parse::<f64>() {
+                                    opacity = val.clamp(0.0, 100.0);
                                 }
                             }
+                            "2" => {
+                                p2_code = p.value.parse::<f64>().ok().map(|v| v.round() as i64);
+                            }
+                            "3" => {
+                                p3_code = p.value.parse::<f64>().ok().map(|v| v.round() as i64);
+                            }
+                            _ => {}
                         }
                         if p.is_animated {
-                            is_nondefault = true;
+                            has_animated = true;
                         }
                     }
-                    if is_nondefault {
+                    if let Some(bm) = p3_code
+                        .filter(|&c| c != 0)
+                        .and_then(BlendMode::from_premiere_param3)
+                        .or_else(|| {
+                            p2_code
+                                .filter(|&c| c != 18)
+                                .and_then(BlendMode::from_premiere_param2)
+                        })
+                    {
+                        blend_mode = bm;
+                    }
+                    // Only flag Opacity as a manual-review effect when animated (keyframes);
+                    // static opacity & blend mode are natively encoded across Premiere/Resolve/FCP!
+                    if has_animated {
                         effects.push(EffectInstance {
                             id: component.attribute("ObjectID").unwrap_or("").to_string(),
                             match_name,
@@ -1673,7 +1703,7 @@ fn parse_clip(
                             media_kind: kind,
                             enabled: true,
                             is_intrinsic: false,
-                            is_animated: params.iter().any(|p| p.is_animated),
+                            is_animated: true,
                             parameters: params,
                         });
                     }
@@ -1788,9 +1818,10 @@ fn parse_clip(
         label_preset_index,
         motion,
         opacity,
+        blend_mode,
         lumetri_effects,
         effects,
-        markers: Vec::new(),
+        markers: clip_markers,
     }
 }
 
@@ -1997,14 +2028,64 @@ fn parse_marker_owner(
             .unwrap_or("")
             .to_string();
 
+        let color = extract_premiere_marker_color(details).unwrap_or_else(|| "Blue".to_string());
+
         out.push(Marker {
             frame: fps.adobe_ticks_to_frames(start_ticks),
             duration_frames: fps.adobe_ticks_to_frames(dur_ticks).max(1),
             name,
             comment,
-            color: "Blue".to_string(),
+            color,
             scope,
         });
     }
     out
+}
+
+fn extract_premiere_marker_color(details: &serde_json::Value) -> Option<String> {
+    let cue_list = details.get("mCuePointList")?.as_array()?;
+    for item in cue_list {
+        let raw_val = item.get("mValue").and_then(|v| v.as_str())?;
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_val) {
+            if let Some(argb) = parsed
+                .get("color")
+                .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u32 as u64)))
+            {
+                let color_name = match argb as u32 {
+                    4285640049 => "Green",
+                    4291314231 => "Red",
+                    4289825711 => "Purple",
+                    4293496637 => "Orange",
+                    4293774903 => "Yellow",
+                    4294967295 => "White",
+                    4282552534 => "Blue",
+                    4283018442 => "Cyan",
+                    4293418162 => "Pink",
+                    other => {
+                        // Classify unknown ARGB color by dominant RGB channel
+                        let r = ((other >> 16) & 0xFF) as i32;
+                        let g = ((other >> 8) & 0xFF) as i32;
+                        let b = (other & 0xFF) as i32;
+                        if r > 220 && g > 220 && b > 220 {
+                            "White"
+                        } else if r > g + 40 && r > b + 40 {
+                            if g > 140 { "Orange" } else { "Red" }
+                        } else if g > r + 30 && g > b + 30 {
+                            "Green"
+                        } else if r > 180 && g > 180 && b < 120 {
+                            "Yellow"
+                        } else if g > 160 && b > 160 && r < 120 {
+                            "Cyan"
+                        } else if r > 140 && b > 140 && g < 130 {
+                            "Purple"
+                        } else {
+                            "Blue"
+                        }
+                    }
+                };
+                return Some(color_name.to_string());
+            }
+        }
+    }
+    None
 }

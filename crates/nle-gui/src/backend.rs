@@ -155,7 +155,48 @@ pub fn save_effect_preset(path: &Path, preset: &EffectMappingPreset) -> Result<(
 
 pub fn load_effect_preset(path: &Path) -> Result<EffectMappingPreset, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| e.to_string())
+    if let Ok(preset) = serde_json::from_str::<EffectMappingPreset>(&raw) {
+        return Ok(preset);
+    }
+    let decisions = UserEffectDecisions::from_json_str(&raw).map_err(|e| e.to_string())?;
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Imported Decisions")
+        .to_string();
+    Ok(EffectMappingPreset {
+        name,
+        source_format: NleFormat::PremierePro,
+        target_format: NleFormat::DaVinciResolve,
+        decisions,
+    })
+}
+
+/// Count how many media assets in `project` have paths matching `from_prefix`
+/// (using the same separator-normalized prefix matching as `nle_core::apply_relink_rules`).
+pub fn count_matching_relink_paths(project: &Project, from_prefix: &str) -> (usize, usize) {
+    let needle = from_prefix.trim().replace('\\', "/");
+    let total = project
+        .media_assets
+        .iter()
+        .filter(|a| !a.path.is_empty())
+        .count();
+    if needle.is_empty() {
+        return (0, total);
+    }
+    let needle_lower = needle.to_ascii_lowercase();
+    let matched = project
+        .media_assets
+        .iter()
+        .filter(|a| {
+            !a.path.is_empty()
+                && a.path
+                    .replace('\\', "/")
+                    .to_ascii_lowercase()
+                    .starts_with(&needle_lower)
+        })
+        .count();
+    (matched, total)
 }
 
 #[cfg(test)]
@@ -239,6 +280,25 @@ mod tests {
                 .get("ae.adbe subspacestabilizer"),
             Some(&MappingAction::Skip)
         );
+
+        // Also verify raw UserEffectDecisions JSON loads cleanly and relink prefix matching works
+        let raw_path = dir.join("raw_decisions.json");
+        std::fs::write(
+            &raw_path,
+            serde_json::to_string_pretty(&loaded_preset.decisions).unwrap(),
+        )
+        .expect("write raw decisions");
+        let loaded_raw = load_effect_preset(&raw_path).expect("load raw decisions");
+        assert_eq!(
+            loaded_raw.decisions.actions.get("ae.adbe subspacestabilizer"),
+            Some(&MappingAction::Skip)
+        );
+
+        let (matched, total) = count_matching_relink_paths(&loaded.project, "/Media");
+        assert!(total > 0);
+        assert!(matched > 0);
+        let (zero_matched, _) = count_matching_relink_paths(&loaded.project, "/NonExistentDrive");
+        assert_eq!(zero_matched, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -116,6 +116,7 @@ mod tests {
                             ..Default::default()
                         },
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: vec![LumetriData {
                             order: 0,
                             display_name: "Lumetri Color".into(),
@@ -168,6 +169,7 @@ mod tests {
                         label_preset_index: None,
                         motion: MotionTransform::default(),
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: vec![],
                         effects: vec![],
                         markers: vec![],
@@ -335,6 +337,7 @@ mod tests {
                         label_preset_index: None,
                         motion: MotionTransform::default(),
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: vec![],
                         effects: vec![],
                         markers: vec![],
@@ -547,6 +550,7 @@ mod tests {
                             label_preset_index: None,
                             motion: MotionTransform::default(),
                             opacity: 100.0,
+                            blend_mode: BlendMode::Normal,
                             lumetri_effects: vec![],
                             effects: vec![],
                             markers: vec![],
@@ -609,6 +613,7 @@ mod tests {
                                 label_preset_index: None,
                                 motion: MotionTransform::default(),
                                 opacity: 85.0,
+                                blend_mode: BlendMode::Normal,
                                 lumetri_effects: vec![],
                                 effects: vec![],
                                 markers: vec![],
@@ -641,6 +646,7 @@ mod tests {
                                 label_preset_index: None,
                                 motion: MotionTransform::default(),
                                 opacity: 100.0,
+                                blend_mode: BlendMode::Normal,
                                 lumetri_effects: vec![],
                                 effects: vec![],
                                 markers: vec![],
@@ -687,6 +693,7 @@ mod tests {
                             label_preset_index: None,
                             motion: MotionTransform::default(),
                             opacity: 100.0,
+                            blend_mode: BlendMode::Normal,
                             lumetri_effects: vec![],
                             effects: vec![],
                             markers: vec![],
@@ -887,6 +894,7 @@ mod tests {
                         label_preset_index: None,
                         motion: MotionTransform::default(),
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: vec![],
                         effects: vec![],
                         markers: vec![],
@@ -932,6 +940,7 @@ mod tests {
                         label_preset_index: None,
                         motion: MotionTransform::default(),
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: vec![],
                         effects: vec![],
                         markers: vec![],
@@ -976,6 +985,176 @@ mod tests {
 
         let aclip = &reread.sequences[0].audio_tracks[0].clips[0];
         assert_eq!(aclip.audio_channel, 3);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn roundtrips_crop_clip_markers_and_disabled_clips() {
+        let project = Project {
+            name: "CropMarkersDisabled".into(),
+            source_format: NleFormat::PremierePro,
+            media_assets: vec![MediaAsset {
+                id: "m1".into(),
+                name: "ShotA.mov".into(),
+                path: "/Media/ShotA.mov".into(),
+                media_kind: MediaKind::Video,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 200,
+                source_tc_frame: 0,
+                source_tc_string: "00:00:00:00".into(),
+                audio_channels: 2,
+                audio_sample_rate: 48_000,
+                color_space: None,
+                video_codec: Some("apcn".into()),
+                audio_codec: Some("Linear PCM".into()),
+                alpha_mode: AlphaMode::Default,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: None,
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
+            }],
+            sequences: vec![Sequence {
+                id: "seq-1".into(),
+                name: "Main".into(),
+                kind: SequenceKind::Timeline,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 150,
+                start_tc_frame: 0,
+                mark_in: None,
+                mark_out: None,
+                video_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![
+                        Clip {
+                            id: "c1".into(),
+                            name: "ShotA.mov".into(),
+                            media_id: "m1".into(),
+                            media_path: "/Media/ShotA.mov".into(),
+                            media_kind: MediaKind::Video,
+                            source_kind: ClipSourceKind::Media,
+                            active_angle: None,
+                            start_frame: 0,
+                            end_frame: 75,
+                            source_in_frame: 0,
+                            source_out_frame: 75,
+                            source_in_ticks: None,
+                            source_out_ticks: None,
+                            source_fps: Rational::FPS_25,
+                            source_width: 1920,
+                            source_height: 1080,
+                            speed_percent: 100.0,
+                            reversed: false,
+                            speed_keyframes: vec![],
+                            retime_interpolation: RetimeInterpolation::Default,
+                            enabled: true,
+                            audio_channel: 0,
+                            link_group_id: None,
+                            label_name: Some("BE.Prefs.LabelColors.8".into()),
+                            label_preset_index: Some(8),
+                            motion: MotionTransform {
+                                crop_left: 10.0,
+                                crop_right: 5.0,
+                                crop_top: 12.5,
+                                crop_bottom: 12.5,
+                                ..Default::default()
+                            },
+                            opacity: 100.0,
+                            blend_mode: BlendMode::Normal,
+                            lumetri_effects: vec![],
+                            effects: vec![],
+                            markers: vec![Marker {
+                                frame: 20,
+                                duration_frames: 5,
+                                name: "Clip Note".into(),
+                                comment: "Letterbox crop check".into(),
+                                color: "Green".into(),
+                                scope: MarkerScope::Clip,
+                            }],
+                        },
+                        Clip {
+                            id: "c2".into(),
+                            name: "ShotA_Disabled.mov".into(),
+                            media_id: "m1".into(),
+                            media_path: "/Media/ShotA.mov".into(),
+                            media_kind: MediaKind::Video,
+                            source_kind: ClipSourceKind::Media,
+                            active_angle: None,
+                            start_frame: 75,
+                            end_frame: 150,
+                            source_in_frame: 75,
+                            source_out_frame: 150,
+                            source_in_ticks: None,
+                            source_out_ticks: None,
+                            source_fps: Rational::FPS_25,
+                            source_width: 1920,
+                            source_height: 1080,
+                            speed_percent: 100.0,
+                            reversed: false,
+                            speed_keyframes: vec![],
+                            retime_interpolation: RetimeInterpolation::Default,
+                            enabled: false,
+                            audio_channel: 0,
+                            link_group_id: None,
+                            label_name: None,
+                            label_preset_index: None,
+                            motion: MotionTransform::default(),
+                            opacity: 100.0,
+                            blend_mode: BlendMode::Normal,
+                            lumetri_effects: vec![],
+                            effects: vec![],
+                            markers: vec![],
+                        },
+                    ],
+                    transitions: vec![],
+                    markers: vec![],
+                }],
+                audio_tracks: vec![],
+                audio_buses: vec![],
+                markers: vec![],
+                metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_crop_clip_markers_disabled.drp");
+        let report =
+            write_drp_file(&project, &out_path, &ConversionOptions::default()).expect("write .drp");
+        assert_eq!(report.markers_written, 1);
+
+        let reread = read_drp_file(&out_path).expect("re-read .drp");
+        let clips = &reread.sequences[0].video_tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+
+        // Clip 1: Crop Filter 6 + clip color + clip marker
+        let c1 = &clips[0];
+        assert!(c1.enabled);
+        assert!((c1.motion.crop_left - 10.0).abs() < 1e-4);
+        assert!((c1.motion.crop_right - 5.0).abs() < 1e-4);
+        assert!((c1.motion.crop_top - 12.5).abs() < 1e-4);
+        assert!((c1.motion.crop_bottom - 12.5).abs() < 1e-4);
+        assert_eq!(c1.label_preset_index, Some(8));
+        assert_eq!(c1.markers.len(), 1);
+        assert_eq!(c1.markers[0].name, "Clip Note");
+        assert_eq!(c1.markers[0].comment, "Letterbox crop check");
+        assert_eq!(c1.markers[0].color, "Green");
+        assert_eq!(c1.markers[0].frame, 20);
+        assert_eq!(c1.markers[0].duration_frames, 5);
+
+        // Clip 2: disabled clip flag survived roundtrip
+        assert!(!clips[1].enabled);
 
         let _ = std::fs::remove_file(&out_path);
     }

@@ -1,8 +1,8 @@
 use super::time::{file_url_to_path, parse_frame_duration_to_fps, FcpTime};
 use nle_core::{
-    frames_to_timecode, AlphaMode, Clip, ClipSourceKind, ColorConfig, DataLevels, EffectCategory,
-    EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    frames_to_timecode, AlphaMode, BlendMode, Clip, ClipSourceKind, ColorConfig, DataLevels,
+    EffectCategory, EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
     RetimeInterpolation, Sequence, SequenceKind, SpeedKeyframe, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node, ParsingOptions};
@@ -809,11 +809,27 @@ impl ParseContext {
         tb: &mut TrackBuilder,
         markers: &mut Vec<Marker>,
     ) {
+        let children: Vec<Node<'_, '_>> = spine_node.children().filter(|n| n.is_element()).collect();
         let mut cursor = spine_origin;
-        for child in spine_node.children().filter(|n| n.is_element()) {
+        for (idx, child) in children.iter().copied().enumerate() {
             let tag = child.tag_name().name();
             if tag == "transition" {
-                self.parse_transition(child, cursor, spine_lane, tb, markers);
+                let has_prev = idx > 0
+                    && !matches!(
+                        children[idx - 1].tag_name().name(),
+                        "gap" | "transition"
+                    );
+                let has_next = idx + 1 < children.len()
+                    && !matches!(
+                        children[idx + 1].tag_name().name(),
+                        "gap" | "transition"
+                    );
+                let alignment = match (has_prev, has_next) {
+                    (false, true) => "start",
+                    (true, false) => "end",
+                    _ => "center",
+                };
+                self.parse_transition(child, cursor, spine_lane, alignment, tb, markers);
                 continue;
             }
             let elem_offset = child
@@ -948,7 +964,7 @@ impl ParseContext {
         let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, asset.start, asset_fmt.fps);
 
-        let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
+        let (motion, opacity, blend_mode, effects) = self.parse_clip_adjustments_and_effects(
             node,
             tb.seq_width,
             tb.seq_height,
@@ -1022,6 +1038,7 @@ impl ParseContext {
                 label_preset_index: None,
                 motion,
                 opacity,
+                blend_mode,
                 lumetri_effects: Vec::new(),
                 effects: video_effects,
                 markers: Vec::new(),
@@ -1063,6 +1080,7 @@ impl ParseContext {
                 label_preset_index: None,
                 motion: MotionTransform::default(),
                 opacity: 100.0,
+                blend_mode: BlendMode::Normal,
                 lumetri_effects: Vec::new(),
                 effects: audio_effects,
                 markers: Vec::new(),
@@ -1103,7 +1121,7 @@ impl ParseContext {
         let wrapper_name = node.attribute("name").map(|s| s.to_string());
         let wrapper_enabled = node.attribute("enabled").map(|s| s != "0").unwrap_or(true);
 
-        let (wrapper_motion, wrapper_opacity, wrapper_effects) = self
+        let (wrapper_motion, wrapper_opacity, wrapper_blend, wrapper_effects) = self
             .parse_clip_adjustments_and_effects(node, tb.seq_width, tb.seq_height, TrackKind::Video);
 
         let link_group_id = self.alloc_id("fcp-link");
@@ -1133,6 +1151,7 @@ impl ParseContext {
                         wrapper_enabled,
                         Some(&wrapper_motion),
                         Some(wrapper_opacity),
+                        Some(wrapper_blend),
                         &wrapper_effects,
                         tb,
                         markers,
@@ -1154,6 +1173,7 @@ impl ParseContext {
                         wrapper_name.as_deref(),
                         wrapper_window,
                         wrapper_enabled,
+                        None,
                         None,
                         None,
                         &[],
@@ -1194,6 +1214,7 @@ impl ParseContext {
             true,
             None,
             None,
+            None,
             &[],
             tb,
             markers,
@@ -1213,6 +1234,7 @@ impl ParseContext {
         parent_enabled: bool,
         parent_motion: Option<&MotionTransform>,
         parent_opacity: Option<f64>,
+        parent_blend: Option<BlendMode>,
         parent_effects: &[EffectInstance],
         tb: &mut TrackBuilder,
         markers: &mut Vec<Marker>,
@@ -1273,7 +1295,7 @@ impl ParseContext {
         let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, eff_local_start, eff_dur, asset.start, asset_fmt.fps);
 
-        let (own_motion, own_opacity, mut effects) = self.parse_clip_adjustments_and_effects(
+        let (own_motion, own_opacity, own_blend, mut effects) = self.parse_clip_adjustments_and_effects(
             node,
             tb.seq_width,
             tb.seq_height,
@@ -1288,6 +1310,11 @@ impl ParseContext {
             own_opacity
         } else {
             parent_opacity.unwrap_or(100.0)
+        };
+        let blend_mode = if !own_blend.is_normal() {
+            own_blend
+        } else {
+            parent_blend.unwrap_or(BlendMode::Normal)
         };
         effects.extend(parent_effects.iter().cloned());
 
@@ -1323,6 +1350,7 @@ impl ParseContext {
             label_preset_index: None,
             motion,
             opacity,
+            blend_mode,
             lumetri_effects: Vec::new(),
             effects,
             markers: Vec::new(),
@@ -1355,6 +1383,7 @@ impl ParseContext {
                 fallback_name,
                 clamp_window,
                 parent_enabled,
+                None,
                 None,
                 None,
                 &[],
@@ -1421,7 +1450,7 @@ impl ParseContext {
 
         let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, comp_start, comp_seq.frame_rate);
-        let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
+        let (motion, opacity, blend_mode, effects) = self.parse_clip_adjustments_and_effects(
             node,
             tb.seq_width,
             tb.seq_height,
@@ -1463,6 +1492,7 @@ impl ParseContext {
             label_preset_index: None,
             motion,
             opacity,
+            blend_mode,
             lumetri_effects: Vec::new(),
             effects,
             markers: Vec::new(),
@@ -1498,6 +1528,7 @@ impl ParseContext {
                 label_preset_index: None,
                 motion: MotionTransform::default(),
                 opacity: 100.0,
+                blend_mode: BlendMode::Normal,
                 lumetri_effects: Vec::new(),
                 effects: Vec::new(),
                 markers: Vec::new(),
@@ -1576,7 +1607,7 @@ impl ParseContext {
 
         let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, mc_start, mc_seq.frame_rate);
-        let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
+        let (motion, opacity, blend_mode, effects) = self.parse_clip_adjustments_and_effects(
             node,
             tb.seq_width,
             tb.seq_height,
@@ -1618,6 +1649,7 @@ impl ParseContext {
             label_preset_index: None,
             motion,
             opacity,
+            blend_mode,
             lumetri_effects: Vec::new(),
             effects,
             markers: Vec::new(),
@@ -1653,6 +1685,7 @@ impl ParseContext {
                 label_preset_index: None,
                 motion: MotionTransform::default(),
                 opacity: 100.0,
+                blend_mode: BlendMode::Normal,
                 lumetri_effects: Vec::new(),
                 effects: Vec::new(),
                 markers: Vec::new(),
@@ -1726,6 +1759,7 @@ impl ParseContext {
         node: Node<'_, '_>,
         fallback_offset: FcpTime,
         lane: i32,
+        alignment: &str,
         tb: &mut TrackBuilder,
         markers: &mut Vec<Marker>,
     ) {
@@ -1765,7 +1799,7 @@ impl ParseContext {
                     effect_id: fx_id,
                     start_frame,
                     end_frame,
-                    alignment: "center".to_string(),
+                    alignment: alignment.to_string(),
                 },
             );
         } else if audio_filter.is_none() {
@@ -1778,7 +1812,7 @@ impl ParseContext {
                         effect_id: tr_name.clone(),
                         start_frame,
                         end_frame,
-                        alignment: "center".to_string(),
+                        alignment: alignment.to_string(),
                     },
                 );
             }
@@ -1794,7 +1828,7 @@ impl ParseContext {
                     effect_id: fx_id,
                     start_frame,
                     end_frame,
-                    alignment: "center".to_string(),
+                    alignment: alignment.to_string(),
                 },
             );
         }
@@ -1830,9 +1864,10 @@ impl ParseContext {
         seq_width: u32,
         seq_height: u32,
         default_kind: TrackKind,
-    ) -> (MotionTransform, f64, Vec<EffectInstance>) {
+    ) -> (MotionTransform, f64, BlendMode, Vec<EffectInstance>) {
         let mut motion = MotionTransform::default();
         let mut opacity = 100.0_f64;
+        let mut blend_mode = BlendMode::Normal;
         let mut effects = Vec::new();
         let aspect = if seq_height > 0 {
             seq_width as f64 / seq_height as f64
@@ -1907,22 +1942,26 @@ impl ParseContext {
                         let low = m.trim().to_ascii_lowercase();
                         !low.is_empty() && low != "normal" && !low.ends_with("(normal)")
                     }) {
-                        effects.push(EffectInstance {
-                            id: self.alloc_id("fx"),
-                            match_name: "fcp.compositing".to_string(),
-                            display_name: format!("Blend Mode ({mode})"),
-                            category: EffectCategory::Transform,
-                            media_kind: TrackKind::Video,
-                            enabled: true,
-                            is_intrinsic: false,
-                            is_animated: has_keyframe_animation(child),
-                            parameters: vec![EffectParameter {
-                                id: "mode".to_string(),
-                                name: "Blend Mode".to_string(),
-                                value: mode.to_string(),
-                                is_animated: false,
-                            }],
-                        });
+                        if let Some(bm) = BlendMode::parse_name(mode) {
+                            blend_mode = bm;
+                        } else {
+                            effects.push(EffectInstance {
+                                id: self.alloc_id("fx"),
+                                match_name: "fcp.compositing".to_string(),
+                                display_name: format!("Blend Mode ({mode})"),
+                                category: EffectCategory::Transform,
+                                media_kind: TrackKind::Video,
+                                enabled: true,
+                                is_intrinsic: false,
+                                is_animated: has_keyframe_animation(child),
+                                parameters: vec![EffectParameter {
+                                    id: "mode".to_string(),
+                                    name: "Blend Mode".to_string(),
+                                    value: mode.to_string(),
+                                    is_animated: false,
+                                }],
+                            });
+                        }
                     }
                 }
                 "adjust-stabilization" => {
@@ -2012,7 +2051,7 @@ impl ParseContext {
             }
         }
 
-        (motion, opacity, effects)
+        (motion, opacity, blend_mode, effects)
     }
 
     fn parse_filter_node(&mut self, child: Node<'_, '_>, kind: TrackKind) -> EffectInstance {

@@ -4279,6 +4279,7 @@ name = "nle-effects"
 version = "0.1.0"
 dependencies = [
  "nle-core",
+ "roxmltree 0.20.0",
  "serde",
  "serde_json",
 ]

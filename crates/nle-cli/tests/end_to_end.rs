@@ -374,3 +374,420 @@ fn flatten_multicam_and_speed_ramp_across_formats() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cross_nle_third_party_plugin_matches_and_attaches_natively() {
+    use nle_effects::{
+        analyze_project_effects_with_plugins, InstalledPlugin, InstalledPluginRegistry,
+        MappingFidelity, PluginFormat,
+    };
+
+    let dir = std::env::temp_dir().join("aagedal_nle_cross_plugin_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    // Deterministic registry mirroring Redact Anonymizer installed in Premiere, Resolve, and FCP
+    let registry = InstalledPluginRegistry::from_plugins(vec![
+        InstalledPlugin {
+            name: "Redact Anonymizer".into(),
+            normalized_name: "redact anonymizer".into(),
+            target_nle: NleFormat::PremierePro,
+            format: PluginFormat::PremiereMediaCore,
+            media_kind: nle_core::TrackKind::Video,
+            native_id: "AE.AGDL Multi-Layer Anonymizer".into(),
+            bundle_id: Some("me.aagedal.premiere.anonymizer".into()),
+            category: Some("Aagedal".into()),
+            version: Some("2.0.0".into()),
+            path: "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/Anonymizer.plugin".into(),
+            match_aliases: vec![
+                "agdl multi layer anonymizer".into(),
+                "anonymizer".into(),
+                "multilayeranonymizer".into(),
+                "redact anonymizer".into(),
+            ],
+        },
+        InstalledPlugin {
+            name: "Redact Anonymizer".into(),
+            normalized_name: "redact anonymizer".into(),
+            target_nle: NleFormat::DaVinciResolve,
+            format: PluginFormat::OpenFx,
+            media_kind: nle_core::TrackKind::Video,
+            native_id: "me.aagedal.ofx.MultiLayerAnonymizer".into(),
+            bundle_id: Some("me.aagedal.ofx.MultiLayerAnonymizer".into()),
+            category: None,
+            version: Some("2.0.0".into()),
+            path: "/Library/OFX/Plugins/Anonymizer.ofx.bundle".into(),
+            match_aliases: vec![
+                "anonymizer".into(),
+                "me.aagedal.ofx.multilayeranonymizer".into(),
+                "multilayeranonymizer".into(),
+                "redact anonymizer".into(),
+            ],
+        },
+        InstalledPlugin {
+            name: "Redact Anonymizer".into(),
+            normalized_name: "redact anonymizer".into(),
+            target_nle: NleFormat::FinalCutPro,
+            format: PluginFormat::FxPlug,
+            media_kind: nle_core::TrackKind::Video,
+            native_id: "FxPlug:211035B9-C3CF-42E6-B8CB-F9C28DC3B98A".into(),
+            bundle_id: Some("me.aagedal.fxplug.anonymizer.service".into()),
+            category: Some("Aagedal".into()),
+            version: Some("2.0.0".into()),
+            path: "/Applications/Redact Anonymizer.app/Contents/PlugIns/Redact Anonymizer XPC Service.pluginkit".into(),
+            match_aliases: vec![
+                "anonymizerfxplugin".into(),
+                "redact anonymizer".into(),
+            ],
+        },
+    ]);
+
+    // 1. Start from a Final Cut Pro project containing Redact Anonymizer Motion Effect template
+    let fcpxml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.15">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="r2" name="Interview.mov" uid="UID-1" start="0s" duration="100/25s" hasVideo="1" format="r1">
+      <media-rep kind="original-media" src="file:///Media/Interview.mov"/>
+    </asset>
+    <effect id="r3" name="Redact Anonymizer" uid="~/Effects.localized/Aagedal/Redact Anonymizer/Redact Anonymizer.moef"/>
+  </resources>
+  <library>
+    <event name="News">
+      <project name="Anonymized_Interview">
+        <sequence format="r1" duration="100/25s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <asset-clip ref="r2" offset="0s" name="Interview.mov" start="0s" duration="100/25s">
+              <filter-video ref="r3" name="Redact Anonymizer"/>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    let fcp_proj = nle_interchange::parse_fcpxml_str(fcpxml, "Anonymized_Interview").unwrap();
+
+    // 2. FCP -> Premiere Pro: Redact Anonymizer matches installed Premiere plugin & attaches natively!
+    let mut to_pr = fcp_proj.clone();
+    let plan_pr = analyze_project_effects_with_plugins(&to_pr, &[], NleFormat::PremierePro, &registry);
+    assert_eq!(plan_pr.unmapped_count, 0);
+    assert_eq!(plan_pr.needs_user_review_count, 1);
+    assert_eq!(plan_pr.effects[0].fidelity, MappingFidelity::AskUserSuggested);
+    assert_eq!(
+        plan_pr.effects[0].available_targets[0].id,
+        "plugin.premiere:AE.AGDL Multi-Layer Anonymizer"
+    );
+
+    let fx_pr = apply_effect_decisions(&mut to_pr, &plan_pr, &UserEffectDecisions::default(), true);
+    assert_eq!(fx_pr.markers_injected, 1);
+    let pr_out = dir.join("with_redact.prproj");
+    nle_premiere::write_prproj_file(
+        &to_pr,
+        &pr_out,
+        &ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        },
+    )
+    .expect("write prproj with Redact Anonymizer");
+
+    // Re-read the written .prproj -> verify Redact Anonymizer is natively attached!
+    let pr_reread = nle_premiere::read_prproj_file(&pr_out).expect("re-read prproj");
+    let pr_clip = &pr_reread.sequences[0].video_tracks[0].clips[0];
+    assert!(
+        pr_clip
+            .effects
+            .iter()
+            .any(|e| e.match_name == "AE.AGDL Multi-Layer Anonymizer"),
+        "expected native Premiere plugin AE.AGDL Multi-Layer Anonymizer on clip, got: {:?}",
+        pr_clip.effects
+    );
+
+    // 3. Premiere Pro -> Final Cut Pro: Redact Anonymizer matches installed FxPlug & attaches natively!
+    let mut to_fcp = pr_reread.clone();
+    let plan_fcp = analyze_project_effects_with_plugins(&to_fcp, &[], NleFormat::FinalCutPro, &registry);
+    assert_eq!(
+        plan_fcp.effects[0].available_targets[0].id,
+        "plugin.fcp:FxPlug:211035B9-C3CF-42E6-B8CB-F9C28DC3B98A"
+    );
+    apply_effect_decisions(&mut to_fcp, &plan_fcp, &UserEffectDecisions::default(), true);
+    let fcp_out = dir.join("back_to_fcp.fcpxml");
+    nle_interchange::write_fcpxml_file(
+        &to_fcp,
+        &fcp_out,
+        &ConversionOptions {
+            target_format: NleFormat::FinalCutPro,
+            ..Default::default()
+        },
+    )
+    .expect("write fcpxml with FxPlug");
+    let fcp_text = std::fs::read_to_string(&fcp_out).unwrap();
+    assert!(fcp_text.contains("FxPlug:211035B9-C3CF-42E6-B8CB-F9C28DC3B98A"));
+    assert!(fcp_text.contains("<filter-video"));
+    let fcp_reread = nle_interchange::read_fcpxml_file(&fcp_out).expect("re-read fcpxml");
+    assert!(fcp_reread.sequences[0].video_tracks[0].clips[0]
+        .effects
+        .iter()
+        .any(|e| e.match_name.contains("FxPlug:211035B9-C3CF-42E6-B8CB-F9C28DC3B98A")));
+
+    // 4. Premiere Pro -> DaVinci Resolve: matches installed Resolve OFX ID
+    let plan_drp = analyze_project_effects_with_plugins(&pr_reread, &[], NleFormat::DaVinciResolve, &registry);
+    assert_eq!(
+        plan_drp.effects[0].available_targets[0].id,
+        "plugin.resolve.ofx:me.aagedal.ofx.MultiLayerAnonymizer"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn roundtrips_fades_transitions_opacity_and_blend_modes_across_all_three_nles() {
+    use nle_core::*;
+    use std::collections::BTreeMap;
+
+    let dir = std::env::temp_dir().join("aagedal_nle_fades_blend_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let mk_clip = |id: &str, name: &str, start: i64, end: i64, opacity: f64, blend: BlendMode, media_kind: MediaKind| Clip {
+        id: id.into(),
+        name: name.into(),
+        media_id: "m1".into(),
+        media_path: "/Media/SceneA.mov".into(),
+        media_kind,
+        source_kind: ClipSourceKind::Media,
+        active_angle: None,
+        start_frame: start,
+        end_frame: end,
+        source_in_frame: start,
+        source_out_frame: end,
+        source_in_ticks: None,
+        source_out_ticks: None,
+        source_fps: Rational::FPS_25,
+        source_width: 1920,
+        source_height: 1080,
+        speed_percent: 100.0,
+        reversed: false,
+        speed_keyframes: vec![],
+        retime_interpolation: RetimeInterpolation::Default,
+        enabled: true,
+        audio_channel: if media_kind == MediaKind::Audio { 1 } else { 0 },
+        link_group_id: None,
+        label_name: None,
+        label_preset_index: None,
+        motion: MotionTransform::default(),
+        opacity,
+        blend_mode: blend,
+        lumetri_effects: vec![],
+        effects: vec![],
+        markers: vec![],
+    };
+
+    let project = Project {
+        name: "FadesAndBlends".into(),
+        source_format: NleFormat::PremierePro,
+        media_assets: vec![MediaAsset {
+            id: "m1".into(),
+            name: "SceneA.mov".into(),
+            path: "/Media/SceneA.mov".into(),
+            media_kind: MediaKind::Video,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_25,
+            duration_frames: 400,
+            source_tc_frame: 0,
+            source_tc_string: "00:00:00:00".into(),
+            audio_channels: 2,
+            audio_sample_rate: 48_000,
+            color_space: None,
+            video_codec: None,
+            audio_codec: None,
+            alpha_mode: AlphaMode::Default,
+            data_levels: DataLevels::Auto,
+            pixel_aspect_ratio: None,
+            metadata: BTreeMap::new(),
+            custom_metadata: BTreeMap::new(),
+        }],
+        sequences: vec![Sequence {
+            id: "seq-1".into(),
+            name: "Fades_Blend_Edit".into(),
+            kind: SequenceKind::Timeline,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_25,
+            duration_frames: 200,
+            start_tc_frame: 0,
+            mark_in: None,
+            mark_out: None,
+            video_tracks: vec![
+                Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![
+                        mk_clip("v1", "Shot1", 0, 100, 100.0, BlendMode::Normal, MediaKind::Video),
+                        mk_clip("v2", "Shot2", 100, 200, 100.0, BlendMode::Normal, MediaKind::Video),
+                    ],
+                    transitions: vec![
+                        // Head fade-in
+                        Transition {
+                            name: "Cross Dissolve".into(),
+                            effect_id: "AE.ADBE Cross Dissolve".into(),
+                            start_frame: 0,
+                            end_frame: 20,
+                            alignment: "start".into(),
+                        },
+                        // Mid-cut Dip to Black
+                        Transition {
+                            name: "Dip to Black".into(),
+                            effect_id: "AE.ADBE Dip to Black".into(),
+                            start_frame: 90,
+                            end_frame: 110,
+                            alignment: "center".into(),
+                        },
+                        // Tail fade-out
+                        Transition {
+                            name: "Cross Dissolve".into(),
+                            effect_id: "AE.ADBE Cross Dissolve".into(),
+                            start_frame: 180,
+                            end_frame: 200,
+                            alignment: "end".into(),
+                        },
+                    ],
+                    markers: vec![],
+                },
+                Track {
+                    index: 2,
+                    kind: TrackKind::Video,
+                    name: "V2".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![
+                        mk_clip("v3", "OverlayFlare", 25, 125, 72.5, BlendMode::Screen, MediaKind::Video),
+                        mk_clip("v4", "MultiplyTex", 125, 175, 60.0, BlendMode::Multiply, MediaKind::Video),
+                    ],
+                    transitions: vec![],
+                    markers: vec![],
+                },
+            ],
+            audio_tracks: vec![Track {
+                index: 1,
+                kind: TrackKind::Audio,
+                name: "A1".into(),
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+                audio_channels: 2,
+                output_bus_id: None,
+                clips: vec![
+                    mk_clip("a1", "Audio1", 0, 100, 100.0, BlendMode::Normal, MediaKind::Audio),
+                    mk_clip("a2", "Audio2", 100, 200, 100.0, BlendMode::Normal, MediaKind::Audio),
+                ],
+                transitions: vec![
+                    Transition {
+                        name: "Constant Power".into(),
+                        effect_id: "Constant Power".into(),
+                        start_frame: 0,
+                        end_frame: 15,
+                        alignment: "start".into(),
+                    },
+                    Transition {
+                        name: "Exponential Fade".into(),
+                        effect_id: "Exponential Fade".into(),
+                        start_frame: 185,
+                        end_frame: 200,
+                        alignment: "end".into(),
+                    },
+                ],
+                markers: vec![],
+            }],
+            audio_buses: vec![],
+            markers: vec![],
+            metadata: BTreeMap::new(),
+        }],
+        ..Default::default()
+    };
+
+    // 1. Premiere IR -> Resolve .drp -> read back
+    let drp_path = dir.join("fades_blends.drp");
+    nle_resolve::write_drp_file(&project, &drp_path, &ConversionOptions::default()).unwrap();
+    let from_drp = nle_resolve::read_drp_file(&drp_path).unwrap();
+    let drp_seq = &from_drp.sequences[0];
+    assert_eq!(drp_seq.video_tracks[0].transitions.len(), 3);
+    assert_eq!(drp_seq.video_tracks[0].transitions[0].alignment, "start");
+    assert_eq!(drp_seq.video_tracks[0].transitions[1].name, "Dip To Color Dissolve");
+    assert_eq!(drp_seq.video_tracks[0].transitions[2].alignment, "end");
+    assert_eq!(drp_seq.audio_tracks[0].transitions.len(), 2);
+    assert_eq!(drp_seq.audio_tracks[0].transitions[0].name, "Cross Fade +3DB");
+    assert_eq!(drp_seq.audio_tracks[0].transitions[1].name, "Cross Fade -3DB");
+    assert!((drp_seq.video_tracks[1].clips[0].opacity - 72.5).abs() < 1e-3);
+    assert_eq!(drp_seq.video_tracks[1].clips[0].blend_mode, BlendMode::Screen);
+    assert!((drp_seq.video_tracks[1].clips[1].opacity - 60.0).abs() < 1e-3);
+    assert_eq!(drp_seq.video_tracks[1].clips[1].blend_mode, BlendMode::Multiply);
+
+    // 2. Resolve -> Premiere .prproj -> read back
+    let pr_path = dir.join("fades_blends.prproj");
+    nle_premiere::write_prproj_file(
+        &from_drp,
+        &pr_path,
+        &ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let from_pr = nle_premiere::read_prproj_file(&pr_path).unwrap();
+    let pr_seq = &from_pr.sequences[0];
+    assert_eq!(pr_seq.video_tracks[0].transitions.len(), 3);
+    assert_eq!(pr_seq.video_tracks[0].transitions[0].alignment, "start");
+    assert_eq!(pr_seq.video_tracks[0].transitions[1].effect_id, "AE.ADBE Dip to Black");
+    assert_eq!(pr_seq.video_tracks[0].transitions[2].alignment, "end");
+    assert_eq!(pr_seq.audio_tracks[0].transitions.len(), 2);
+    assert_eq!(pr_seq.audio_tracks[0].transitions[0].alignment, "start");
+    assert_eq!(pr_seq.audio_tracks[0].transitions[1].effect_id, "Exponential Fade");
+    assert_eq!(pr_seq.audio_tracks[0].transitions[1].alignment, "end");
+    assert!((pr_seq.video_tracks[1].clips[0].opacity - 72.5).abs() < 1e-3);
+    assert_eq!(pr_seq.video_tracks[1].clips[0].blend_mode, BlendMode::Screen);
+    assert!((pr_seq.video_tracks[1].clips[1].opacity - 60.0).abs() < 1e-3);
+    assert_eq!(pr_seq.video_tracks[1].clips[1].blend_mode, BlendMode::Multiply);
+
+    // 3. Premiere -> Final Cut Pro .fcpxml -> read back
+    let fcp_path = dir.join("fades_blends.fcpxml");
+    nle_interchange::write_fcpxml_file(
+        &from_pr,
+        &fcp_path,
+        &ConversionOptions {
+            target_format: NleFormat::FinalCutPro,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let from_fcp = nle_interchange::read_fcpxml_file(&fcp_path).unwrap();
+    let fcp_seq = &from_fcp.sequences[0];
+    assert_eq!(fcp_seq.video_tracks[0].transitions.len(), 3);
+    assert_eq!(fcp_seq.video_tracks[0].transitions[0].alignment, "start");
+    assert_eq!(fcp_seq.video_tracks[0].transitions[1].alignment, "center");
+    assert_eq!(fcp_seq.video_tracks[0].transitions[2].alignment, "end");
+    assert_eq!(fcp_seq.audio_tracks[0].transitions.len(), 2);
+    assert_eq!(fcp_seq.audio_tracks[0].transitions[0].alignment, "start");
+    assert_eq!(fcp_seq.audio_tracks[0].transitions[1].alignment, "end");
+    assert!((fcp_seq.video_tracks[1].clips[0].opacity - 72.5).abs() < 1e-1);
+    assert_eq!(fcp_seq.video_tracks[1].clips[0].blend_mode, BlendMode::Screen);
+    assert!((fcp_seq.video_tracks[1].clips[1].opacity - 60.0).abs() < 1e-1);
+    assert_eq!(fcp_seq.video_tracks[1].clips[1].blend_mode, BlendMode::Multiply);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

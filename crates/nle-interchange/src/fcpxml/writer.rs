@@ -10,7 +10,8 @@ use std::fs;
 use std::path::Path;
 
 const FCP_CROSS_DISSOLVE_UID: &str = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265";
-const FCP_FADE_TO_COLOR_UID: &str = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265";
+const FCP_FADE_TO_COLOR_UID: &str = "FxPlug:641A7C1D-3932-4989-9997-2854B4445779";
+const FCP_AUDIO_CROSSFADE_UID: &str = "FFAudioTransition";
 
 pub struct FcpXmlWriter;
 
@@ -90,9 +91,19 @@ pub fn write_fcpxml_file(
                 if clip.source_kind == ClipSourceKind::Media {
                     res.ensure_asset_for_clip(clip);
                 }
+                for eff in &clip.effects {
+                    res.ensure_clip_filter_effect(eff);
+                }
             }
-            for tr in &track.transitions {
+        }
+        if let Some(v1) = seq.video_tracks.first() {
+            for tr in &v1.transitions {
                 res.ensure_transition_effect(tr);
+            }
+        }
+        if let Some(a1) = seq.audio_tracks.first() {
+            if !a1.transitions.is_empty() {
+                res.ensure_audio_transition_effect();
             }
         }
     }
@@ -521,6 +532,66 @@ impl<'a> ResourceRegistry<'a> {
         rid
     }
 
+    fn ensure_clip_filter_effect(&mut self, eff: &nle_core::EffectInstance) -> Option<String> {
+        let uid = extract_fcp_filter_uid(eff)?;
+        let name = if eff.display_name.is_empty() {
+            uid.to_string()
+        } else {
+            eff.display_name.clone()
+        };
+        let key = format!("{name}|{uid}");
+        if let Some(e) = self.effects.get(&key) {
+            return Some(e.res_id.clone());
+        }
+        let rid = self.alloc_res_id();
+        self.effects.insert(
+            key,
+            RegisteredEffect {
+                res_id: rid.clone(),
+                name,
+                uid: uid.to_string(),
+            },
+        );
+        Some(rid)
+    }
+
+    fn clip_filter_effect_id(&self, eff: &nle_core::EffectInstance) -> Option<(&str, &str)> {
+        let uid = extract_fcp_filter_uid(eff)?;
+        let name = if eff.display_name.is_empty() {
+            uid
+        } else {
+            eff.display_name.as_str()
+        };
+        let key = format!("{name}|{uid}");
+        self.effects
+            .get(&key)
+            .map(|e| (e.res_id.as_str(), e.name.as_str()))
+    }
+
+    fn ensure_audio_transition_effect(&mut self) -> String {
+        let key = format!("Audio Crossfade|{FCP_AUDIO_CROSSFADE_UID}");
+        if let Some(e) = self.effects.get(&key) {
+            return e.res_id.clone();
+        }
+        let rid = self.alloc_res_id();
+        self.effects.insert(
+            key,
+            RegisteredEffect {
+                res_id: rid.clone(),
+                name: "Audio Crossfade".to_string(),
+                uid: FCP_AUDIO_CROSSFADE_UID.to_string(),
+            },
+        );
+        rid
+    }
+
+    fn audio_transition_effect_id(&self) -> Option<(&str, &str)> {
+        let key = format!("Audio Crossfade|{FCP_AUDIO_CROSSFADE_UID}");
+        self.effects
+            .get(&key)
+            .map(|e| (e.res_id.as_str(), e.name.as_str()))
+    }
+
     fn transition_effect_id(&self, tr: &Transition) -> Option<(&str, &str)> {
         let lower = tr.name.to_ascii_lowercase();
         let (canonical_name, uid) = if lower.contains("dip") || lower.contains("fade") {
@@ -909,26 +980,79 @@ fn write_sequence_element(
         }
     }
 
-    // Index V1 transitions by the cut point between adjacent spine slots
+    // Index V1 and A1 transitions by cut point (including head fade-ins at s_idx == 0 and tail fade-outs!)
     let v1_transitions: &[Transition] = seq
         .video_tracks
         .first()
         .map(|t| t.transitions.as_slice())
         .unwrap_or(&[]);
-    let mut emitted_tr: HashSet<usize> = HashSet::new();
+    let a1_transitions: &[Transition] = seq
+        .audio_tracks
+        .first()
+        .map(|t| t.transitions.as_slice())
+        .unwrap_or(&[]);
+    let mut emitted_v_tr: HashSet<usize> = HashSet::new();
+    let mut emitted_a_tr: HashSet<usize> = HashSet::new();
 
     for (s_idx, slot) in slots.iter().enumerate() {
-        // Check if a V1 transition straddles the cut right before this slot
-        if s_idx > 0 {
-            let cut_frame = slot.start_frame;
-            for (tr_idx, tr) in v1_transitions.iter().enumerate() {
-                if !emitted_tr.contains(&tr_idx)
-                    && tr.start_frame <= cut_frame
-                    && tr.end_frame >= cut_frame
-                {
-                    write_transition_element(tr, tc_start, seq.frame_rate, res, indent + 4, xml);
-                    emitted_tr.insert(tr_idx);
-                }
+        let cut_frame = slot.start_frame;
+        for (tr_idx, tr) in v1_transitions.iter().enumerate() {
+            if emitted_v_tr.contains(&tr_idx) {
+                continue;
+            }
+            let matches_head = s_idx == 0 && tr.start_frame <= cut_frame && tr.alignment == "start";
+            let matches_cut = s_idx > 0 && tr.start_frame <= cut_frame && tr.end_frame >= cut_frame;
+            if matches_head || matches_cut {
+                let paired_audio = a1_transitions.iter().enumerate().find_map(|(a_idx, atr)| {
+                    if emitted_a_tr.contains(&a_idx) {
+                        return None;
+                    }
+                    let a_head = s_idx == 0 && atr.start_frame <= cut_frame && atr.alignment == "start";
+                    let a_cut = s_idx > 0 && atr.start_frame <= cut_frame && atr.end_frame >= cut_frame;
+                    if (matches_head && a_head) || (matches_cut && a_cut) {
+                        Some((a_idx, atr))
+                    } else {
+                        None
+                    }
+                });
+                let include_audio = if let Some((a_idx, _)) = paired_audio {
+                    emitted_a_tr.insert(a_idx);
+                    true
+                } else {
+                    false
+                };
+                write_transition_element(
+                    Some(tr),
+                    include_audio,
+                    tr,
+                    tc_start,
+                    seq.frame_rate,
+                    res,
+                    indent + 4,
+                    xml,
+                );
+                emitted_v_tr.insert(tr_idx);
+            }
+        }
+        // Emit any standalone A1 audio transition at this cut that didn't pair with a V1 transition
+        for (a_idx, atr) in a1_transitions.iter().enumerate() {
+            if emitted_a_tr.contains(&a_idx) {
+                continue;
+            }
+            let a_head = s_idx == 0 && atr.start_frame <= cut_frame && atr.alignment == "start";
+            let a_cut = s_idx > 0 && atr.start_frame <= cut_frame && atr.end_frame >= cut_frame;
+            if a_head || a_cut {
+                write_transition_element(
+                    None,
+                    true,
+                    atr,
+                    tc_start,
+                    seq.frame_rate,
+                    res,
+                    indent + 4,
+                    xml,
+                );
+                emitted_a_tr.insert(a_idx);
             }
         }
 
@@ -996,6 +1120,48 @@ fn write_sequence_element(
                     stats,
                 );
             }
+        }
+    }
+
+    // Emit any trailing V1/A1 fade-out transitions at the end of the spine
+    for (tr_idx, tr) in v1_transitions.iter().enumerate() {
+        if !emitted_v_tr.contains(&tr_idx) {
+            let paired_audio = a1_transitions
+                .iter()
+                .enumerate()
+                .find(|(a_idx, _)| !emitted_a_tr.contains(a_idx));
+            let include_audio = if let Some((a_idx, _)) = paired_audio {
+                emitted_a_tr.insert(a_idx);
+                true
+            } else {
+                false
+            };
+            write_transition_element(
+                Some(tr),
+                include_audio,
+                tr,
+                tc_start,
+                seq.frame_rate,
+                res,
+                indent + 4,
+                xml,
+            );
+            emitted_v_tr.insert(tr_idx);
+        }
+    }
+    for (a_idx, atr) in a1_transitions.iter().enumerate() {
+        if !emitted_a_tr.contains(&a_idx) {
+            write_transition_element(
+                None,
+                true,
+                atr,
+                tc_start,
+                seq.frame_rate,
+                res,
+                indent + 4,
+                xml,
+            );
+            emitted_a_tr.insert(a_idx);
         }
     }
 
@@ -1154,10 +1320,29 @@ fn write_clip_element(
             xml.push_str(&format!("{cpad}<adjust-transform {attrs}/>\n"));
         }
 
-        // 4. Opacity (<adjust-blend>)
-        if (clip.opacity - 100.0).abs() > 1e-3 {
+        // 4. Opacity & Blend Mode (<adjust-blend>)
+        let has_opacity = (clip.opacity - 100.0).abs() > 1e-3;
+        let has_blend = !clip.blend_mode.is_normal();
+        if has_opacity || has_blend {
             let amt = (clip.opacity / 100.0).clamp(0.0, 1.0);
-            xml.push_str(&format!("{cpad}<adjust-blend amount=\"{amt:.4}\"/>\n"));
+            let mut attrs = String::new();
+            if has_opacity {
+                attrs.push_str(&format!(" amount=\"{amt:.4}\""));
+            }
+            if has_blend {
+                attrs.push_str(&format!(" mode=\"{}\"", clip.blend_mode.to_fcpxml_mode()));
+            }
+            xml.push_str(&format!("{cpad}<adjust-blend{attrs}/>\n"));
+        }
+
+        // 4b. Matched native FCP FxPlug / Motion Effect filters (<filter-video>)
+        for eff in &clip.effects {
+            if let Some((fx_rid, fx_name)) = res.clip_filter_effect_id(eff) {
+                xml.push_str(&format!(
+                    "{cpad}<filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
+                    xml_escape(fx_name)
+                ));
+            }
         }
     }
 
@@ -1283,8 +1468,11 @@ fn write_timemap_element(
     xml.push_str(&format!("{pad}</timeMap>\n"));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_transition_element(
-    tr: &Transition,
+    video_tr: Option<&Transition>,
+    include_audio: bool,
+    timing_tr: &Transition,
     tc_start: FcpTime,
     fps: Rational,
     res: &ResourceRegistry<'_>,
@@ -1292,19 +1480,29 @@ fn write_transition_element(
     xml: &mut String,
 ) {
     let pad = " ".repeat(indent);
-    let off = tc_start + FcpTime::from_frames(tr.start_frame.max(0), fps);
-    let dur = FcpTime::from_frames((tr.end_frame - tr.start_frame).max(1), fps);
+    let off = tc_start + FcpTime::from_frames(timing_tr.start_frame.max(0), fps);
+    let dur = FcpTime::from_frames((timing_tr.end_frame - timing_tr.start_frame).max(1), fps);
     xml.push_str(&format!(
         "{pad}<transition name=\"{}\" offset=\"{}\" duration=\"{}\">\n",
-        xml_escape(&tr.name),
+        xml_escape(&timing_tr.name),
         off.to_fcpxml_string(),
         dur.to_fcpxml_string()
     ));
-    if let Some((fx_rid, fx_name)) = res.transition_effect_id(tr) {
-        xml.push_str(&format!(
-            "{pad}  <filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
-            xml_escape(fx_name)
-        ));
+    if let Some(vtr) = video_tr {
+        if let Some((fx_rid, fx_name)) = res.transition_effect_id(vtr) {
+            xml.push_str(&format!(
+                "{pad}  <filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
+                xml_escape(fx_name)
+            ));
+        }
+    }
+    if include_audio {
+        if let Some((fx_rid, fx_name)) = res.audio_transition_effect_id() {
+            xml.push_str(&format!(
+                "{pad}  <filter-audio ref=\"{fx_rid}\" name=\"{}\"/>\n",
+                xml_escape(fx_name)
+            ));
+        }
     }
     xml.push_str(&format!("{pad}</transition>\n"));
 }
@@ -1356,6 +1554,33 @@ fn find_anchor_slot(slots: &[SpineSlot<'_>], frame: i64) -> usize {
         }
     }
     slots.len().saturating_sub(1)
+}
+
+fn extract_fcp_filter_uid(eff: &nle_core::EffectInstance) -> Option<&str> {
+    if !eff.enabled || eff.is_intrinsic || eff.media_kind != nle_core::TrackKind::Video {
+        return None;
+    }
+    let m = eff.match_name.trim();
+    if m.starts_with("FxPlug:")
+        || m.starts_with("~/Effects.localized/")
+        || m.starts_with(".../Effects.localized/")
+        || m.ends_with(".moef")
+    {
+        return Some(m);
+    }
+    if let Some(rest) = m.strip_prefix("fcp.") {
+        if let Some((_, uid)) = rest.split_once(':') {
+            let u = uid.trim();
+            if u.starts_with("FxPlug:")
+                || u.starts_with("~/Effects.localized/")
+                || u.starts_with(".../Effects.localized/")
+                || u.ends_with(".moef")
+            {
+                return Some(u);
+            }
+        }
+    }
+    None
 }
 
 fn fcpxml_tc_format(fps: Rational) -> &'static str {

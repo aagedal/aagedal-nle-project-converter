@@ -4,10 +4,10 @@ pub mod sqlite;
 use crate::fcpxml::time::FcpTime;
 use bplist::{parse_bplist_nskeyed, PlistValue};
 use nle_core::{
-    frames_to_timecode, AlphaMode, Clip, ClipSourceKind, ColorConfig, DataLevels, EffectCategory,
-    EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
-    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
-    RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind,
+    frames_to_timecode, AlphaMode, BlendMode, Clip, ClipSourceKind, ColorConfig, DataLevels,
+    EffectCategory, EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    RetimeInterpolation, Sequence, SequenceKind, SpeedKeyframe, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, ParsingOptions};
 use sqlite::{SqlValue, SqliteDb};
@@ -637,6 +637,17 @@ fn read_project_sequence(
     let mut markers = Vec::new();
     let mut next_id = 1usize;
 
+    // Extract sequence-level markers attached to the root collection
+    extract_bundle_markers(
+        &graph,
+        root_col.pk,
+        tc_start,
+        tc_start,
+        seq_fps,
+        MarkerScope::Sequence,
+        &mut markers,
+    );
+
     // Walk primary spine `containedItems` in `$order`
     let spine_items = graph.named_child_items(root_col.pk, "containedItems");
     let mut cursor = tc_start;
@@ -652,6 +663,33 @@ fn read_project_sequence(
             .and_then(parse_fcp_range)
             .map(|(_, d)| d)
             .unwrap_or(FcpTime::ZERO);
+
+        if item.ztype == "FFAnchoredTransition" {
+            // Transitions overlap the edit point at `cursor`; do not advance the spine cursor.
+            if item_dur.num > 0 {
+                let dur_frames = item_dur.to_frames(seq_fps).max(1);
+                let cut_frame = (cursor - tc_start).to_frames(seq_fps).max(0);
+                let half = dur_frames / 2;
+                let tr_start = (cut_frame - half).max(0);
+                let tr_name = item
+                    .plist
+                    .as_ref()
+                    .and_then(|p| p.get("displayName"))
+                    .and_then(PlistValue::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Cross Dissolve")
+                    .to_string();
+                let tr = Transition {
+                    name: tr_name.clone(),
+                    effect_id: tr_name,
+                    start_frame: tr_start,
+                    end_frame: tr_start + dur_frames,
+                    alignment: "center".to_string(),
+                };
+                builder.add_video_transition(0, tr);
+            }
+            continue;
+        }
 
         parse_bundle_item(
             &graph,
@@ -838,7 +876,7 @@ fn parse_bundle_item(
             stacks.extend(graph.named_child_items(pk, "audioEffects"));
             stacks.extend(extra_effect_stacks);
 
-            let (motion, opacity, effects) =
+            let (motion, opacity, blend_mode, effects) =
                 extract_bundle_effects(graph, &stacks, tb.seq_width, tb.seq_height, next_id);
 
             let asset = primary_asset_id
@@ -871,6 +909,25 @@ fn parse_bundle_item(
                     2,
                 )
             };
+
+            let clip_enabled = !pl
+                .get("disabled")
+                .and_then(PlistValue::as_bool)
+                .unwrap_or(false);
+
+            let (speed_percent, reversed, speed_keyframes) =
+                extract_bundle_retiming(graph, pk, pl, clipped_dur);
+
+            let mut clip_markers = Vec::new();
+            extract_bundle_markers(
+                graph,
+                pk,
+                clipped_start,
+                FcpTime::ZERO,
+                vp_fps,
+                MarkerScope::Clip,
+                &mut clip_markers,
+            );
 
             let src_in_frame = (clipped_start - asset_start).to_frames(vp_fps).max(0);
             let src_out_frame = ((clipped_start + clipped_dur) - asset_start)
@@ -927,20 +984,21 @@ fn parse_bundle_item(
                         source_fps: vp_fps,
                         source_width: vp_w,
                         source_height: vp_h,
-                        speed_percent: 100.0,
-                        reversed: false,
-                        speed_keyframes: Vec::new(),
+                        speed_percent,
+                        reversed,
+                        speed_keyframes: speed_keyframes.clone(),
                         retime_interpolation: RetimeInterpolation::Default,
-                        enabled: true,
+                        enabled: clip_enabled,
                         audio_channel: 0,
                         link_group_id: link_group_id.clone(),
                         label_name: None,
                         label_preset_index: None,
                         motion,
                         opacity,
+                        blend_mode,
                         lumetri_effects: Vec::new(),
                         effects: v_fx,
-                        markers: Vec::new(),
+                        markers: clip_markers.clone(),
                     },
                 );
             }
@@ -968,20 +1026,21 @@ fn parse_bundle_item(
                         source_fps: vp_fps,
                         source_width: vp_w,
                         source_height: vp_h,
-                        speed_percent: 100.0,
-                        reversed: false,
-                        speed_keyframes: Vec::new(),
+                        speed_percent,
+                        reversed,
+                        speed_keyframes,
                         retime_interpolation: RetimeInterpolation::Default,
-                        enabled: true,
+                        enabled: clip_enabled,
                         audio_channel: 1,
                         link_group_id,
                         label_name: None,
                         label_preset_index: None,
                         motion: MotionTransform::default(),
                         opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
                         lumetri_effects: Vec::new(),
                         effects: a_fx,
-                        markers: Vec::new(),
+                        markers: if emit_video { Vec::new() } else { clip_markers },
                     },
                     audio_ch,
                 );
@@ -1061,6 +1120,182 @@ fn walk_bundle_anchored_items(
     }
 }
 
+// ── Bundle Markers & Retiming Decoders ──────────────────────────────────
+
+fn extract_bundle_markers(
+    graph: &EventGraph,
+    parent_pk: i64,
+    origin: FcpTime,
+    tc_offset: FcpTime,
+    fps: Rational,
+    scope: MarkerScope,
+    out: &mut Vec<Marker>,
+) {
+    let mut marker_pks = graph.named_child_items(parent_pk, "markers");
+    marker_pks.extend(graph.named_child_items(parent_pk, "metadata"));
+
+    for mpk in marker_pks {
+        let Some(node) = graph.nodes.get(&mpk) else {
+            continue;
+        };
+        if !matches!(
+            node.ztype.as_str(),
+            "FFMarker" | "FFChapterMarker" | "FFToDoMarker" | "FFAnchoredMarker"
+        ) {
+            continue;
+        }
+        let Some(pl) = &node.plist else {
+            continue;
+        };
+        let (m_start, m_dur) = pl
+            .get("range")
+            .or_else(|| pl.get("clippedRange"))
+            .and_then(PlistValue::as_str)
+            .and_then(parse_fcp_range)
+            .unwrap_or_else(|| {
+                let s = pl
+                    .get("start")
+                    .and_then(PlistValue::as_str)
+                    .and_then(FcpTime::parse)
+                    .unwrap_or(origin);
+                let d = pl
+                    .get("duration")
+                    .and_then(PlistValue::as_str)
+                    .and_then(FcpTime::parse)
+                    .unwrap_or(FcpTime::ZERO);
+                (s, d)
+            });
+
+        let rel_time = if scope == MarkerScope::Sequence {
+            m_start - tc_offset
+        } else {
+            m_start - origin
+        };
+        let frame = rel_time.to_frames(fps).max(0);
+        let duration_frames = m_dur.to_frames(fps).max(1);
+        let name = pl
+            .get("name")
+            .or_else(|| pl.get("displayName"))
+            .or_else(|| pl.get("value"))
+            .and_then(PlistValue::as_str)
+            .unwrap_or("Marker")
+            .to_string();
+        let comment = pl
+            .get("note")
+            .or_else(|| pl.get("comment"))
+            .and_then(PlistValue::as_str)
+            .unwrap_or("")
+            .to_string();
+        let color = match node.ztype.as_str() {
+            "FFChapterMarker" => "Orange",
+            "FFToDoMarker" => {
+                if pl
+                    .get("completed")
+                    .and_then(PlistValue::as_bool)
+                    .unwrap_or(false)
+                {
+                    "Green"
+                } else {
+                    "Red"
+                }
+            }
+            _ => "Blue",
+        }
+        .to_string();
+
+        out.push(Marker {
+            frame,
+            duration_frames,
+            name,
+            comment,
+            color,
+            scope,
+        });
+    }
+}
+
+fn extract_bundle_retiming(
+    graph: &EventGraph,
+    clip_pk: i64,
+    clip_pl: &PlistValue,
+    clipped_dur: FcpTime,
+) -> (f64, bool, Vec<SpeedKeyframe>) {
+    // 1. Direct speed / reverse properties on the collection plist (if present)
+    if let Some(rate) = clip_pl
+        .get("rate")
+        .or_else(|| clip_pl.get("speed"))
+        .and_then(PlistValue::as_f64)
+    {
+        if rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
+            let pct = if rate.abs() <= 20.0 { rate * 100.0 } else { rate };
+            return (pct, pct < 0.0, Vec::new());
+        }
+    }
+
+    // 2. Inspect child timeMap / FFTimeMap nodes (if present)
+    let mut tm_pks = graph.named_child_items(clip_pk, "timeMap");
+    tm_pks.extend(graph.named_child_items(clip_pk, "timeRemap"));
+    for comp_pk in graph.named_child_items(clip_pk, "containedItems") {
+        tm_pks.extend(graph.named_child_items(comp_pk, "timeMap"));
+    }
+
+    for tpk in tm_pks {
+        let Some(tnode) = graph.nodes.get(&tpk) else {
+            continue;
+        };
+        let Some(tpl) = &tnode.plist else {
+            continue;
+        };
+        if let Some(pts_arr) = tpl
+            .get("timePoints")
+            .or_else(|| tpl.get("points"))
+            .and_then(PlistValue::as_array)
+        {
+            let mut pts: Vec<SpeedKeyframe> = Vec::new();
+            for pt in pts_arr {
+                let t = pt
+                    .get("time")
+                    .and_then(PlistValue::as_str)
+                    .and_then(FcpTime::parse)
+                    .map(|ft| ft.num as f64 / ft.den.max(1) as f64)
+                    .or_else(|| pt.get("time").and_then(PlistValue::as_f64));
+                let v = pt
+                    .get("value")
+                    .and_then(PlistValue::as_str)
+                    .and_then(FcpTime::parse)
+                    .map(|ft| ft.num as f64 / ft.den.max(1) as f64)
+                    .or_else(|| pt.get("value").and_then(PlistValue::as_f64));
+                if let (Some(timeline_sec), Some(source_sec)) = (t, v) {
+                    if timeline_sec.is_finite() && source_sec.is_finite() {
+                        pts.push(SpeedKeyframe {
+                            timeline_sec,
+                            source_sec,
+                        });
+                    }
+                }
+            }
+            if pts.len() >= 2 {
+                let dt = pts.last().unwrap().timeline_sec - pts[0].timeline_sec;
+                let dv = pts.last().unwrap().source_sec - pts[0].source_sec;
+                if dt.abs() > 1e-6 {
+                    let speed = (dv / dt) * 100.0;
+                    let kfs = if pts.len() > 2 { pts } else { Vec::new() };
+                    return (speed, speed < 0.0, kfs);
+                }
+            }
+        }
+        if let Some(rate) = tpl.get("rate").and_then(PlistValue::as_f64) {
+            if rate.is_finite() && (rate - 1.0).abs() > 1e-4 {
+                let pct = if rate.abs() <= 20.0 { rate * 100.0 } else { rate };
+                return (pct, pct < 0.0, Vec::new());
+            }
+        }
+    }
+
+    let _ = clipped_dur;
+    (100.0, false, Vec::new())
+}
+
 // ── Effect & OZML Decoding ──────────────────────────────────────────────
 
 fn extract_bundle_effects(
@@ -1069,9 +1304,10 @@ fn extract_bundle_effects(
     seq_width: u32,
     seq_height: u32,
     next_id: &mut usize,
-) -> (MotionTransform, f64, Vec<EffectInstance>) {
+) -> (MotionTransform, f64, BlendMode, Vec<EffectInstance>) {
     let mut motion = MotionTransform::default();
     let mut opacity = 100.0_f64;
+    let mut blend_mode = BlendMode::Normal;
     let mut effects = Vec::new();
     let mut visited = HashSet::new();
 
@@ -1090,6 +1326,7 @@ fn extract_bundle_effects(
                 seq_height,
                 &mut motion,
                 &mut opacity,
+                &mut blend_mode,
                 &mut effects,
                 next_id,
                 &mut visited,
@@ -1097,7 +1334,7 @@ fn extract_bundle_effects(
         }
     }
 
-    (motion, opacity, effects)
+    (motion, opacity, blend_mode, effects)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1108,6 +1345,7 @@ fn process_bundle_effect_node(
     seq_height: u32,
     motion: &mut MotionTransform,
     opacity: &mut f64,
+    blend_mode: &mut BlendMode,
     effects: &mut Vec<EffectInstance>,
     next_id: &mut usize,
     visited: &mut HashSet<i64>,
@@ -1127,7 +1365,7 @@ fn process_bundle_effect_node(
         }
         "FFHeBlendEffect" => {
             if let Some(xml_bytes) = pl.get("channelData").and_then(PlistValue::as_bytes) {
-                parse_ozml_blend(xml_bytes, opacity, effects, next_id);
+                parse_ozml_blend(xml_bytes, opacity, blend_mode, effects, next_id);
             }
         }
         "FFStabilizationEffect" => {
@@ -1160,6 +1398,7 @@ fn process_bundle_effect_node(
                         seq_height,
                         motion,
                         opacity,
+                        blend_mode,
                         effects,
                         next_id,
                         visited,
@@ -1283,6 +1522,7 @@ fn parse_ozml_transform(
 fn parse_ozml_blend(
     xml_bytes: &[u8],
     opacity: &mut f64,
+    blend_mode: &mut BlendMode,
     effects: &mut Vec<EffectInstance>,
     next_id: &mut usize,
 ) {
@@ -1314,25 +1554,29 @@ fn parse_ozml_blend(
             *opacity = pct.clamp(0.0, 100.0);
         } else if pname == "Blend Mode" && val.round() as i64 != 0 {
             let code = val.round() as i64;
-            let mode_label = fcp_blend_mode_name(code);
-            let id = format!("fcpb-fx-{}", *next_id);
-            *next_id += 1;
-            effects.push(EffectInstance {
-                id,
-                match_name: "fcp.compositing".to_string(),
-                display_name: format!("Blend Mode ({mode_label})"),
-                category: EffectCategory::Transform,
-                media_kind: TrackKind::Video,
-                enabled: true,
-                is_intrinsic: false,
-                is_animated: false,
-                parameters: vec![EffectParameter {
-                    id: "mode".to_string(),
-                    name: "Blend Mode".to_string(),
-                    value: mode_label,
+            if let Some(bm) = BlendMode::from_fcp_code(code) {
+                *blend_mode = bm;
+            } else {
+                let mode_label = fcp_blend_mode_name(code);
+                let id = format!("fcpb-fx-{}", *next_id);
+                *next_id += 1;
+                effects.push(EffectInstance {
+                    id,
+                    match_name: "fcp.compositing".to_string(),
+                    display_name: format!("Blend Mode ({mode_label})"),
+                    category: EffectCategory::Transform,
+                    media_kind: TrackKind::Video,
+                    enabled: true,
+                    is_intrinsic: false,
                     is_animated: false,
-                }],
-            });
+                    parameters: vec![EffectParameter {
+                        id: "mode".to_string(),
+                        name: "Blend Mode".to_string(),
+                        value: mode_label,
+                        is_animated: false,
+                    }],
+                });
+            }
         }
     }
 }
@@ -1540,6 +1784,11 @@ impl BundleTrackBuilder {
                 markers: Vec::new(),
             });
         }
+    }
+
+    fn add_video_transition(&mut self, track_idx: usize, tr: Transition) {
+        self.ensure_video_track(track_idx);
+        self.video_tracks[track_idx].transitions.push(tr);
     }
 
     fn place_video_clip(&mut self, preferred_idx: usize, clip: Clip) {

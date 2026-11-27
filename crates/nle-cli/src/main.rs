@@ -3,7 +3,10 @@ use nle_core::{
     flatten_nested_and_multicam_clips, ConversionOptions, NleFormat, Project, ProjectInspection,
     SequenceKind,
 };
-use nle_effects::{analyze_project_effects, apply_effect_decisions, UserEffectDecisions};
+use nle_effects::{
+    analyze_project_effects, apply_effect_decisions, EffectMappingPreset, InstalledPluginRegistry,
+    UserEffectDecisions,
+};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -26,13 +29,16 @@ enum Commands {
         /// Emit machine-readable JSON inspection and effect plan output
         #[arg(long)]
         json: bool,
+        /// Write an editable EffectMappingPreset JSON file with the recommended defaults for this project
+        #[arg(long)]
+        save_preset: Option<PathBuf>,
     },
     /// Convert a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle directly to .prproj, .drp, .fcpxml, .otio, or .xml
     Convert {
         input: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
-        /// Optional JSON effect mapping decisions / preset file
+        /// Optional JSON effect mapping decisions or GUI-saved EffectMappingPreset file
         #[arg(long)]
         preset: Option<PathBuf>,
         /// Optional path relink rule in FROM=TO format
@@ -65,10 +71,22 @@ enum Commands {
         /// Do not inject review markers for mapped/unmapped effects
         #[arg(long)]
         no_fx_markers: bool,
+        /// Emit machine-readable JSON ConversionReport output
+        #[arg(long)]
+        json: bool,
     },
     /// Generate a sample .prproj file containing bins, Lumetri, Motion, and app-exclusive effects
     Demo {
         output: PathBuf,
+    },
+    /// Scan locally installed third-party NLE plugins (Premiere MediaCore, Resolve OFX, FCP FxPlug, AU/VST3)
+    Plugins {
+        /// Show all installed third-party plugins (by default shows plugins installed in 2+ NLEs)
+        #[arg(long)]
+        all: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -97,15 +115,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             nle_premiere::write_sample_prproj(&output)?;
             println!("Wrote demo Premiere Pro project to {}", output.display());
         }
+        Commands::Plugins { all, json } => {
+            let reg = InstalledPluginRegistry::scan_system();
+            let min_nles = if all { 1 } else { 2 };
+            let groups = reg.grouped_plugins(min_nles);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&groups)?);
+                return Ok(());
+            }
+            if groups.is_empty() {
+                if all {
+                    println!("No third-party NLE plugins detected in standard system folders.");
+                } else {
+                    println!(
+                        "No cross-NLE third-party plugins (installed in 2+ NLEs) detected. Run with --all to list single-NLE plugins."
+                    );
+                }
+                return Ok(());
+            }
+            println!(
+                "Detected {} {} third-party plugin(s) ({} total installations scanned):",
+                groups.len(),
+                if all { "installed" } else { "cross-NLE" },
+                reg.plugins().len()
+            );
+            for g in &groups {
+                println!("  • {} [{:?}]", g.name, g.media_kind);
+                for inst in &g.installations {
+                    let ver = inst
+                        .version
+                        .as_deref()
+                        .map(|v| format!(" v{v}"))
+                        .unwrap_or_default();
+                    println!(
+                        "      - {} ({}{ver}): {}",
+                        inst.target_nle.short_name(),
+                        inst.format.short_label(),
+                        inst.native_id
+                    );
+                }
+            }
+        }
         Commands::Inspect {
             input,
             target,
             json,
+            save_preset,
         } => {
             let project = load_project(&input)?;
             let inspection = ProjectInspection::from_project(&project);
-            let target_fmt = NleFormat::from_extension(&target).unwrap_or(NleFormat::DaVinciResolve);
+            let target_fmt = NleFormat::from_extension(&target).ok_or_else(|| {
+                format!(
+                    "Unsupported target format '{target}'. Supported: drp, prproj, fcpxml, otio, xml"
+                )
+            })?;
             let plan = analyze_project_effects(&project, &[], target_fmt);
+
+            if let Some(preset_path) = save_preset {
+                let mut actions = std::collections::BTreeMap::new();
+                for fx in &plan.effects {
+                    actions.insert(fx.key.clone(), fx.default_action.clone());
+                }
+                let preset = EffectMappingPreset {
+                    name: format!("{} Mapping Preset", inspection.name),
+                    source_format: inspection.source_format,
+                    target_format: target_fmt,
+                    decisions: UserEffectDecisions { actions },
+                };
+                if let Some(parent) = preset_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&preset_path, serde_json::to_string_pretty(&preset)?)?;
+                if !json {
+                    println!("Saved effect mapping preset to {}", preset_path.display());
+                }
+            }
 
             if json {
                 let payload = serde_json::json!({
@@ -181,13 +267,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_clip_colors,
             no_grades,
             no_fx_markers,
+            json,
         } => {
             let mut project = load_project(&input)?;
-            let target_fmt = output
+            let out_ext = output
                 .extension()
                 .and_then(|s| s.to_str())
-                .and_then(NleFormat::from_extension)
-                .unwrap_or(NleFormat::DaVinciResolve);
+                .unwrap_or("");
+            let target_fmt = NleFormat::from_extension(out_ext).ok_or_else(|| {
+                format!(
+                    "Unsupported output extension '.{out_ext}'. Supported: .drp, .prproj, .fcpxml, .otio, .xml"
+                )
+            })?;
 
             let selected_sequence_ids: Vec<String> = if sequences.is_empty() {
                 Vec::new()
@@ -244,7 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let plan = analyze_project_effects(&project, &options.selected_sequence_ids, target_fmt);
             let decisions = if let Some(preset_path) = preset {
                 let text = std::fs::read_to_string(preset_path)?;
-                serde_json::from_str::<UserEffectDecisions>(&text)?
+                UserEffectDecisions::from_json_str(&text)?
             } else {
                 UserEffectDecisions::default()
             };
@@ -273,19 +364,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pre_messages.extend(fx_summary.messages);
             report.messages = pre_messages;
 
-            println!(
-                "Converted {} -> {} ({} sequences, {} video clips, {} audio clips, {} grades, {} markers, {} effect review markers)",
-                input.display(),
-                report.output_path,
-                report.sequences_converted,
-                report.video_clips_converted,
-                report.audio_clips_converted,
-                report.grades_attached,
-                report.markers_written,
-                report.effect_markers_injected
-            );
-            for msg in &report.messages {
-                println!("  [{:?}] {} ({})", msg.severity, msg.message, msg.code);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "Converted {} -> {} ({} sequences, {} video clips, {} audio clips, {} grades, {} markers, {} effect review markers)",
+                    input.display(),
+                    report.output_path,
+                    report.sequences_converted,
+                    report.video_clips_converted,
+                    report.audio_clips_converted,
+                    report.grades_attached,
+                    report.markers_written,
+                    report.effect_markers_injected
+                );
+                for msg in &report.messages {
+                    println!("  [{:?}] {} ({})", msg.severity, msg.message, msg.code);
+                }
             }
         }
     }

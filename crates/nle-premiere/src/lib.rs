@@ -400,6 +400,7 @@ mod tests {
                                 label_preset_index: None,
                                 motion: MotionTransform::default(),
                                 opacity: 100.0,
+                                blend_mode: BlendMode::Normal,
                                 lumetri_effects: vec![],
                                 effects: vec![],
                                 markers: vec![],
@@ -470,6 +471,7 @@ mod tests {
                                     ..Default::default()
                                 },
                                 opacity: 80.0,
+                                blend_mode: BlendMode::Screen,
                                 lumetri_effects: vec![LumetriData {
                                     order: 0,
                                     display_name: "Lumetri Color".into(),
@@ -509,6 +511,7 @@ mod tests {
                                 label_preset_index: None,
                                 motion: MotionTransform::default(),
                                 opacity: 100.0,
+                                blend_mode: BlendMode::Normal,
                                 lumetri_effects: vec![],
                                 effects: vec![],
                                 markers: vec![],
@@ -561,6 +564,7 @@ mod tests {
                             label_preset_index: None,
                             motion: MotionTransform::default(),
                             opacity: 100.0,
+                            blend_mode: BlendMode::Normal,
                             lumetri_effects: vec![],
                             effects: vec![],
                             markers: vec![],
@@ -685,6 +689,7 @@ mod tests {
         assert_eq!(main.markers.len(), 1);
         assert_eq!(main.markers[0].name, "Review Cut");
         assert_eq!(main.markers[0].comment, "Check dissolve & multicam");
+        assert_eq!(main.markers[0].color, "Purple");
         assert_eq!(main.video_tracks[0].transitions.len(), 1);
         assert_eq!(main.video_tracks[0].transitions[0].effect_id, "AE.ADBE Cross Dissolve");
         assert_eq!(main.audio_tracks[0].transitions.len(), 1);
@@ -707,6 +712,7 @@ mod tests {
         assert!((v0.motion.rotation - 4.5).abs() < 1e-4);
         assert!((v0.motion.crop_left - 5.0).abs() < 1e-4);
         assert!((v0.opacity - 80.0).abs() < 1e-4);
+        assert_eq!(v0.blend_mode, BlendMode::Screen);
         assert_eq!(v0.label_preset_index, Some(8));
         assert_eq!(v0.lumetri_effects.len(), 1);
         assert_eq!(v0.lumetri_effects[0].exposure, Some(0.5));
@@ -718,6 +724,137 @@ mod tests {
         assert_eq!(v1.active_angle.as_deref(), Some("Camera 3"));
         assert!(v1.reversed);
         assert!((v1.speed_percent - (-100.0)).abs() < 1e-3);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn roundtrips_clip_markers_and_colors_in_native_prproj() {
+        use nle_core::*;
+        use std::collections::BTreeMap;
+
+        let project = Project {
+            name: "ClipMarkersPr".into(),
+            source_format: NleFormat::DaVinciResolve,
+            media_assets: vec![MediaAsset {
+                id: "m1".into(),
+                name: "CamA.mov".into(),
+                path: "/Media/CamA.mov".into(),
+                media_kind: MediaKind::Video,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 200,
+                source_tc_frame: 0,
+                source_tc_string: "00:00:00:00".into(),
+                audio_channels: 2,
+                audio_sample_rate: 48_000,
+                color_space: None,
+                video_codec: None,
+                audio_codec: None,
+                alpha_mode: AlphaMode::Default,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: Some(1.3333),
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
+            }],
+            sequences: vec![Sequence {
+                id: "s1".into(),
+                name: "Seq1".into(),
+                kind: SequenceKind::Timeline,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 100,
+                start_tc_frame: 0,
+                mark_in: None,
+                mark_out: None,
+                video_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![Clip {
+                        id: "c1".into(),
+                        name: "CamA.mov".into(),
+                        media_id: "m1".into(),
+                        media_path: "/Media/CamA.mov".into(),
+                        media_kind: MediaKind::Video,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
+                        start_frame: 0,
+                        end_frame: 100,
+                        source_in_frame: 0,
+                        source_out_frame: 100,
+                        source_in_ticks: None,
+                        source_out_ticks: None,
+                        source_fps: Rational::FPS_25,
+                        source_width: 1920,
+                        source_height: 1080,
+                        speed_percent: 100.0,
+                        reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::Default,
+                        enabled: true,
+                        audio_channel: 0,
+                        link_group_id: None,
+                        label_name: None,
+                        label_preset_index: None,
+                        motion: MotionTransform::default(),
+                        opacity: 100.0,
+                        blend_mode: BlendMode::Normal,
+                        lumetri_effects: vec![],
+                        effects: vec![],
+                        markers: vec![Marker {
+                            frame: 15,
+                            duration_frames: 10,
+                            name: "Audio Pop".into(),
+                            comment: "Fix in mix".into(),
+                            color: "Red".into(),
+                            scope: MarkerScope::Clip,
+                        }],
+                    }],
+                    transitions: vec![],
+                    markers: vec![],
+                }],
+                audio_tracks: vec![],
+                audio_buses: vec![],
+                markers: vec![Marker {
+                    frame: 50,
+                    duration_frames: 1,
+                    name: "Chapter 1".into(),
+                    comment: "Start".into(),
+                    color: "Purple".into(),
+                    scope: MarkerScope::Sequence,
+                }],
+                metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_pr_clip_markers.prproj");
+        let opts = ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        };
+        let rep = write_prproj_file(&project, &out_path, &opts).expect("write prproj");
+        assert_eq!(rep.markers_written, 2);
+
+        let reread = read_prproj_file(&out_path).expect("read prproj");
+        assert_eq!(reread.sequences[0].markers.len(), 1);
+        assert_eq!(reread.sequences[0].markers[0].color, "Purple");
+        let clip_markers = &reread.sequences[0].video_tracks[0].clips[0].markers;
+        assert_eq!(clip_markers.len(), 1);
+        assert_eq!(clip_markers[0].name, "Audio Pop");
+        assert_eq!(clip_markers[0].comment, "Fix in mix");
+        assert_eq!(clip_markers[0].color, "Red");
+        assert_eq!(clip_markers[0].frame, 15);
+        assert_eq!(clip_markers[0].duration_frames, 10);
 
         let _ = std::fs::remove_file(&out_path);
     }

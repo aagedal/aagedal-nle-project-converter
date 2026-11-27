@@ -333,6 +333,11 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                video_codec: None,
+                audio_codec: None,
+                alpha_mode: AlphaMode::Straight,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: Some(1.3333),
                 metadata: BTreeMap::from([
                     ("Description".into(), "Field interview".into()),
                     ("Comments".into(), "Keep audio".into()),
@@ -386,6 +391,8 @@ mod tests {
                                 source_height: 2160,
                                 speed_percent: 100.0,
                                 reversed: false,
+                                speed_keyframes: vec![],
+                                retime_interpolation: RetimeInterpolation::Default,
                                 enabled: true,
                                 audio_channel: 1,
                                 link_group_id: None,
@@ -447,6 +454,8 @@ mod tests {
                                 source_height: 2160,
                                 speed_percent: 50.0,
                                 reversed: false,
+                                speed_keyframes: vec![],
+                                retime_interpolation: RetimeInterpolation::OpticalFlow,
                                 enabled: true,
                                 audio_channel: 1,
                                 link_group_id: Some("grp-1".into()),
@@ -491,6 +500,8 @@ mod tests {
                                 source_height: 1080,
                                 speed_percent: -100.0,
                                 reversed: true,
+                                speed_keyframes: vec![],
+                                retime_interpolation: RetimeInterpolation::Default,
                                 enabled: true,
                                 audio_channel: 1,
                                 link_group_id: None,
@@ -541,6 +552,8 @@ mod tests {
                             source_height: 0,
                             speed_percent: 50.0,
                             reversed: false,
+                            speed_keyframes: vec![],
+                            retime_interpolation: RetimeInterpolation::Default,
                             enabled: true,
                             audio_channel: 1,
                             link_group_id: Some("grp-1".into()),
@@ -681,6 +694,13 @@ mod tests {
         let v0 = &main.video_tracks[0].clips[0];
         let a0 = &main.audio_tracks[0].clips[0];
         assert!((v0.speed_percent - 50.0).abs() < 1e-3);
+        assert_eq!(v0.retime_interpolation, RetimeInterpolation::OpticalFlow);
+        assert_eq!(reread.media_assets[0].alpha_mode, AlphaMode::Straight);
+        assert!(
+            reread.media_assets[0]
+                .pixel_aspect_ratio
+                .is_some_and(|p| (p - 1.3333).abs() < 1e-3)
+        );
         assert!((v0.motion.scale - 125.0).abs() < 1e-4);
         assert!((v0.motion.position_x - 0.1).abs() < 1e-4);
         assert!((v0.motion.position_y - (-0.05)).abs() < 1e-4);

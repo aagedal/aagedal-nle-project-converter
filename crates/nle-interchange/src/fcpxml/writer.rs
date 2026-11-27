@@ -1,9 +1,10 @@
 use super::time::{path_to_file_url, xml_escape, FcpTime};
 use nle_core::{
-    Clip, ClipSourceKind, ConversionOptions, ConversionReport, Marker, MediaAsset, MediaKind,
-    NleError, NleFormat, NleResult, Project, ProjectWriter, Rational, Sequence, SequenceKind,
-    Transition,
+    flatten_nested_and_multicam_clips, Clip, ClipSourceKind, ConversionMessage, ConversionOptions,
+    ConversionReport, Marker, MediaAsset, MediaKind, NleError, NleFormat, NleResult, Project,
+    ProjectWriter, Rational, Sequence, SequenceKind, Transition,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -39,6 +40,17 @@ pub fn write_fcpxml_file(
     output_path: &Path,
     options: &ConversionOptions,
 ) -> NleResult<ConversionReport> {
+    let mut pre_messages: Vec<ConversionMessage> = Vec::new();
+    let project_cow: Cow<'_, Project> = if options.flatten_nested_and_multicam {
+        let mut cloned = project.clone();
+        let flat = flatten_nested_and_multicam_clips(&mut cloned);
+        pre_messages.extend(flat.messages);
+        Cow::Owned(cloned)
+    } else {
+        Cow::Borrowed(project)
+    };
+    let project = project_cow.as_ref();
+
     let selected = collect_target_sequences(project, options);
     if selected.is_empty() {
         return Err(NleError::InvalidFormat(
@@ -194,7 +206,7 @@ pub fn write_fcpxml_file(
         markers_written: stats.markers_written,
         grades_attached: 0,
         effect_markers_injected: 0,
-        messages: Vec::new(),
+        messages: pre_messages,
     })
 }
 
@@ -1086,7 +1098,8 @@ fn write_clip_element(
     let cpad = " ".repeat(indent + 2);
 
     // 1. Retiming (<timeMap>)
-    let is_retimed = (clip.speed_percent - 100.0).abs() > 0.05 || clip.reversed;
+    let is_retimed =
+        (clip.speed_percent - 100.0).abs() > 0.05 || clip.reversed || clip.speed_keyframes.len() > 2;
     if is_retimed {
         write_timemap_element(clip, local_start, dur, res, &cpad, xml);
     }
@@ -1224,6 +1237,23 @@ fn write_timemap_element(
                 .max(clip.source_in_frame + 1),
             clip.source_fps,
         );
+
+    if clip.speed_keyframes.len() > 2 {
+        xml.push_str(&format!("{pad}<timeMap>\n"));
+        for pt in &clip.speed_keyframes {
+            let t_frames = (pt.timeline_sec * clip.source_fps.as_f64()).round() as i64;
+            let v_frames = (pt.source_sec * clip.source_fps.as_f64()).round() as i64;
+            let t_time = FcpTime::from_frames(t_frames.max(0), clip.source_fps);
+            let v_time = asset_tc + FcpTime::from_frames(v_frames.max(0), clip.source_fps);
+            xml.push_str(&format!(
+                "{pad}  <timept time=\"{}\" value=\"{}\" interp=\"smooth2\"/>\n",
+                t_time.to_fcpxml_string(),
+                v_time.to_fcpxml_string()
+            ));
+        }
+        xml.push_str(&format!("{pad}</timeMap>\n"));
+        return;
+    }
 
     let (v0, v1) = if clip.speed_percent.abs() < 1e-4 {
         // Freeze frame

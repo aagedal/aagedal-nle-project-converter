@@ -1,11 +1,13 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use nle_core::{
-    Clip, ClipSourceKind, ConversionMessage, ConversionOptions, ConversionReport, LumetriData,
-    Marker, MediaAsset, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project,
-    ProjectWriter, Rational, Sequence, SequenceKind, Severity, Track, TrackKind, Transition,
+    flatten_nested_and_multicam_clips, AlphaMode, Clip, ClipSourceKind, ConversionMessage,
+    ConversionOptions, ConversionReport, DataLevels, LumetriData, Marker, MediaAsset, MediaKind,
+    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectWriter, Rational,
+    RetimeInterpolation, Sequence, SequenceKind, Severity, Track, TrackKind, Transition,
     ADOBE_TICKS_PER_SECOND,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -80,6 +82,17 @@ pub fn build_prproj_xml(
     project: &Project,
     options: &ConversionOptions,
 ) -> NleResult<(String, ConversionReport)> {
+    let mut pre_messages: Vec<ConversionMessage> = Vec::new();
+    let project_cow: Cow<'_, Project> = if options.flatten_nested_and_multicam {
+        let mut cloned = project.clone();
+        let flat = flatten_nested_and_multicam_clips(&mut cloned);
+        pre_messages.extend(flat.messages);
+        Cow::Owned(cloned)
+    } else {
+        Cow::Borrowed(project)
+    };
+    let project = project_cow.as_ref();
+
     let sequences = collect_target_sequences(project, options);
     if sequences.is_empty() {
         return Err(NleError::InvalidFormat(
@@ -88,7 +101,9 @@ pub fn build_prproj_xml(
     }
 
     let mut ctx = PrprojBuilder::new(project, options);
-    let report = ctx.build(project, &sequences)?;
+    let mut report = ctx.build(project, &sequences)?;
+    pre_messages.append(&mut report.messages);
+    report.messages = pre_messages;
     Ok((ctx.finish_xml(), report))
 }
 
@@ -357,6 +372,11 @@ impl<'a> PrprojBuilder<'a> {
                         audio_channels: 2,
                         audio_sample_rate: 48_000,
                         color_space: None,
+                        video_codec: None,
+                        audio_codec: None,
+                        alpha_mode: AlphaMode::Default,
+                        data_levels: DataLevels::Auto,
+                        pixel_aspect_ratio: None,
                         metadata: BTreeMap::new(),
                         custom_metadata: BTreeMap::new(),
                     });
@@ -657,15 +677,35 @@ impl<'a> PrprojBuilder<'a> {
 
         let video_stream_id = if is_video {
             let vs_id = self.alloc_id();
+            let (ignore_alpha_str, alpha_type_num) = match asset.alpha_mode {
+                AlphaMode::Straight => ("false", 1),
+                AlphaMode::Premultiplied => ("false", 2),
+                AlphaMode::None => ("true", 0),
+                AlphaMode::Default => ("true", 3),
+            };
+            let par_xml = if let Some(par) = asset.pixel_aspect_ratio {
+                if par.is_finite() && par > 0.0 && (par - 1.0).abs() > 1e-4 {
+                    let num = (par * 10_000.0).round() as i64;
+                    format!(
+                        "\t\t<IsPAROverridden>true</IsPAROverridden>\n\
+                         \t\t<PixelAspectRatio>{num},10000</PixelAspectRatio>\n"
+                    )
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             self.push(format!(
                 "\t<VideoStream ObjectID=\"{vs_id}\" ClassID=\"a36e4719-3ec6-4a0c-ab11-8b4aab377aa5\" Version=\"23\">\n\
                  \t\t<Duration>{dur_ticks}</Duration>\n\
-                 \t\t<IgnoreAlpha>true</IgnoreAlpha>\n\
+                 \t\t<IgnoreAlpha>{ignore_alpha_str}</IgnoreAlpha>\n\
                  \t\t<FieldTypeIsUncertain>true</FieldTypeIsUncertain>\n\
                  \t\t<OriginalImageOrientationType>1</OriginalImageOrientationType>\n\
                  \t\t<FrameRate>{frame_ticks}</FrameRate>\n\
                  \t\t<FrameRect>0,0,{w},{h}</FrameRect>\n\
-                 \t\t<AlphaType>3</AlphaType>\n\
+                 {par_xml}\
+                 \t\t<AlphaType>{alpha_type_num}</AlphaType>\n\
                  \t</VideoStream>"
             ));
             Some(vs_id)
@@ -2044,6 +2084,26 @@ impl<'a> PrprojBuilder<'a> {
             String::new()
         };
 
+        let time_interp_xml = match clip.retime_interpolation {
+            RetimeInterpolation::FrameSampling => "\t\t<TimeInterpolationType>0</TimeInterpolationType>\n",
+            RetimeInterpolation::FrameBlending => "\t\t<TimeInterpolationType>1</TimeInterpolationType>\n",
+            RetimeInterpolation::OpticalFlow => "\t\t<TimeInterpolationType>2</TimeInterpolationType>\n",
+            RetimeInterpolation::Default => "",
+        };
+        if clip.speed_keyframes.len() > 2 {
+            report.messages.push(ConversionMessage {
+                severity: Severity::Warning,
+                code: "SPEED_RAMP".into(),
+                sequence: None,
+                clip: Some(clip.name.clone()),
+                message: format!(
+                    "Variable speed ramp ({} keyframes) approximated with average constant speed ({:.1}%) in Premiere Pro; review Time Remapping curve.",
+                    clip.speed_keyframes.len(),
+                    clip.speed_percent
+                ),
+            });
+        }
+
         let vc_id = self.alloc_id();
         self.push(format!(
             "\t<VideoClip ObjectID=\"{vc_id}\" ClassID=\"9308dbef-2440-4acb-9ab2-953b9a4e82ec\" Version=\"11\">\n\
@@ -2058,6 +2118,7 @@ impl<'a> PrprojBuilder<'a> {
              \t\t\t<InPoint>{in_ticks}</InPoint>\n\
              \t\t\t<OutPoint>{out_ticks}</OutPoint>\n\
              \t\t</Clip>\n\
+             {time_interp_xml}\
              \t</VideoClip>",
             Uuid::new_v4()
         ));

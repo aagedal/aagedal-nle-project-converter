@@ -1,10 +1,50 @@
-use crate::binary::{decode_keyed_fields, encode_keyed_fields, hex_encode};
+use crate::binary::{decode_keyed_fields, encode_keyed_fields, hex_decode, hex_encode};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use nle_core::{AudioBus, NleError, NleResult};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+
+/// Decode Resolve 21's `VirtualAudioTrackBA` hex into `(channel_count, first_source_channel_1based)`.
+pub fn decode_virtual_audio_track(hex: &str) -> Option<(u32, u32)> {
+    let raw = hex_decode(hex).ok()?;
+    let fields = decode_keyed_fields(&raw).ok()?;
+    let mut audio_type: Option<u32> = None;
+    let mut first_channel: Option<u32> = None;
+    let mut channel_count: Option<u32> = None;
+
+    for (k, _, v) in fields {
+        match k.as_str() {
+            "AudioType" if v.len() >= 4 => {
+                audio_type = Some(u32::from_be_bytes(v[0..4].try_into().ok()?));
+            }
+            "ChannelsBA" if v.len() >= 12 => {
+                let count = u32::from_be_bytes(v[4..8].try_into().ok()?);
+                let ch0_raw = u32::from_be_bytes(v[8..12].try_into().ok()?);
+                let ch0 = if ch0_raw > 0x4000 {
+                    ch0_raw - 0x4000
+                } else {
+                    ch0_raw.max(1)
+                };
+                if count > 0 {
+                    channel_count = Some(count);
+                }
+                if ch0 > 0 {
+                    first_channel = Some(ch0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let ch_count = channel_count.or_else(|| match audio_type {
+        Some(1) => Some(1),
+        Some(0) => Some(2),
+        _ => None,
+    })?;
+    Some((ch_count, first_channel.unwrap_or(1)))
+}
 
 /// Encode a 1-based audio source channel in Resolve 21's version-2 `VirtualAudioTrackBA` (Mono).
 pub fn mono_channel_mapping(source_channel: u32) -> String {

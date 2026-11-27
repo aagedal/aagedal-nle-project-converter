@@ -1,7 +1,8 @@
 use crate::binary::{
-    decode_keyed_fields, decode_protobuf, encode_keyed_fields, encode_utf16be, hex_decode,
-    hex_encode, ProtoValue,
+    decode_keyed_fields, decode_protobuf, encode_keyed_fields, encode_protobuf, encode_utf16be,
+    hex_decode, hex_encode, ProtoField, ProtoValue,
 };
+use nle_core::SpeedKeyframe;
 use uuid::Uuid;
 
 pub const STILL_SOURCE_IN: &str = "86400";
@@ -121,16 +122,52 @@ pub fn build_media_timemap(
     hex_encode(&encode_keyed_fields(&entries))
 }
 
-/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed, freeze_hold_sec)`.
-/// Returns `Some((100.0, false, None))` for identity `0x02...` maps, negative speed + `reversed = true`
-/// for reverse playback, and `Some((0.0, false, Some(hold_sec)))` for freeze frames / still holds.
-pub fn decode_media_timemap_detail(hex: &str) -> Option<(f64, bool, Option<f64>)> {
+/// Encode a multi-point variable speed ramp (`SpeedKeyframe` list) into Resolve `MediaTimemapBA` hex.
+pub fn build_speed_ramp_timemap(keyframes: &[SpeedKeyframe]) -> Option<String> {
+    if keyframes.len() < 2 {
+        return None;
+    }
+    let mut kf_fields: Vec<ProtoField> = Vec::with_capacity(keyframes.len());
+    for pt in keyframes {
+        let mut sub = Vec::new();
+        if pt.timeline_sec.is_finite() && pt.timeline_sec.abs() > 1e-12 {
+            sub.push(ProtoField::f64_le(1, pt.timeline_sec));
+        }
+        if pt.source_sec.is_finite() && pt.source_sec.abs() > 1e-12 {
+            sub.push(ProtoField::f64_le(2, pt.source_sec));
+        }
+        kf_fields.push(ProtoField::bytes(1, encode_protobuf(&sub)));
+    }
+    let mut kf = vec![0x80];
+    kf.extend_from_slice(&encode_protobuf(&kf_fields));
+
+    let last = keyframes.last().unwrap();
+    let x_max = last.timeline_sec.max(0.0);
+    let y_last = last.source_sec.max(0.0);
+
+    let entries = vec![
+        ("YMin".into(), KEYED_DOUBLE, (-1.0_f64).to_be_bytes().to_vec()),
+        ("YMax".into(), KEYED_DOUBLE, (-1.0_f64).to_be_bytes().to_vec()),
+        ("XMax".into(), KEYED_DOUBLE, x_max.to_be_bytes().to_vec()),
+        ("UniqueId".into(), KEYED_STRING, encode_utf16be(&Uuid::new_v4().to_string())),
+        ("LastValidYOffset".into(), KEYED_DOUBLE, y_last.to_be_bytes().to_vec()),
+        ("KeyframesBA".into(), KEYED_BYTES, kf),
+        ("DbType".into(), KEYED_STRING, encode_utf16be("Sm2TimeMap")),
+    ];
+    Some(hex_encode(&encode_keyed_fields(&entries)))
+}
+
+/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed, freeze_hold_sec, speed_keyframes)`.
+/// `speed_keyframes` is populated when the timemap contains more than 2 control points (a variable speed ramp).
+pub fn decode_media_timemap_full(
+    hex: &str,
+) -> Option<(f64, bool, Option<f64>, Vec<SpeedKeyframe>)> {
     let raw = hex_decode(hex).ok()?;
     if raw.is_empty() {
         return None;
     }
     if raw[0] == 0x02 {
-        return Some((100.0, false, None));
+        return Some((100.0, false, None, Vec::new()));
     }
     let fields = decode_keyed_fields(&raw).ok()?;
     let kf_raw = fields
@@ -168,6 +205,17 @@ pub fn decode_media_timemap_detail(hex: &str) -> Option<(f64, bool, Option<f64>)
     if points.len() < 2 {
         return None;
     }
+    let speed_keyframes = if points.len() > 2 {
+        points
+            .iter()
+            .map(|&(x, y)| SpeedKeyframe {
+                timeline_sec: x,
+                source_sec: y,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let (x0, y0) = points[0];
     let (x1, y1) = points[points.len() - 1];
     let dx = x1 - x0;
@@ -175,14 +223,22 @@ pub fn decode_media_timemap_detail(hex: &str) -> Option<(f64, bool, Option<f64>)
         return None;
     }
     let dy = y1 - y0;
-    if dy.abs() < 1e-9 {
-        return Some((0.0, false, Some(y0.max(0.0))));
+    if dy.abs() < 1e-9 && speed_keyframes.is_empty() {
+        return Some((0.0, false, Some(y0.max(0.0)), Vec::new()));
     }
     let speed = (dy / dx) * 100.0;
     if !speed.is_finite() {
         return None;
     }
-    Some((speed, speed < 0.0, None))
+    Some((speed, speed < 0.0, None, speed_keyframes))
+}
+
+/// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed, freeze_hold_sec)`.
+/// Returns `Some((100.0, false, None))` for identity `0x02...` maps, negative speed + `reversed = true`
+/// for reverse playback, and `Some((0.0, false, Some(hold_sec)))` for freeze frames / still holds.
+pub fn decode_media_timemap_detail(hex: &str) -> Option<(f64, bool, Option<f64>)> {
+    let (spd, rev, hold, _) = decode_media_timemap_full(hex)?;
+    Some((spd, rev, hold))
 }
 
 /// Decode Resolve's `MediaTimemapBA` hex into `(speed_percent, reversed)`.

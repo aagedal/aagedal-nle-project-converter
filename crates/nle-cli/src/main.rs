@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use nle_core::{ConversionOptions, NleFormat, Project, ProjectInspection};
+use nle_core::{
+    flatten_nested_and_multicam_clips, ConversionOptions, NleFormat, Project, ProjectInspection,
+    SequenceKind,
+};
 use nle_effects::{analyze_project_effects, apply_effect_decisions, UserEffectDecisions};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +23,9 @@ enum Commands {
         input: PathBuf,
         #[arg(long, default_value = "drp")]
         target: String,
+        /// Emit machine-readable JSON inspection and effect plan output
+        #[arg(long)]
+        json: bool,
     },
     /// Convert a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle directly to .prproj, .drp, .fcpxml, .otio, or .xml
     Convert {
@@ -32,6 +38,33 @@ enum Commands {
         /// Optional path relink rule in FROM=TO format
         #[arg(long)]
         relink: Vec<String>,
+        /// Optional output project name override
+        #[arg(long)]
+        project_name: Option<String>,
+        /// Optional sequence ID or exact name to convert (repeatable; defaults to all sequences)
+        #[arg(long = "sequence")]
+        sequences: Vec<String>,
+        /// Flatten nested sequences, compound clips, and multicam cuts into source media clips
+        #[arg(long)]
+        flatten_nested: bool,
+        /// Do not recreate project bins / Media Pool folders
+        #[arg(long)]
+        no_bins: bool,
+        /// Do not include unplaced project bin media assets
+        #[arg(long)]
+        no_unused_media: bool,
+        /// Do not preserve timeline markers
+        #[arg(long)]
+        no_markers: bool,
+        /// Do not preserve clip label colors
+        #[arg(long)]
+        no_clip_colors: bool,
+        /// Do not translate Lumetri / Resolve primary color grades
+        #[arg(long)]
+        no_grades: bool,
+        /// Do not inject review markers for mapped/unmapped effects
+        #[arg(long)]
+        no_fx_markers: bool,
     },
     /// Generate a sample .prproj file containing bins, Lumetri, Motion, and app-exclusive effects
     Demo {
@@ -64,11 +97,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             nle_premiere::write_sample_prproj(&output)?;
             println!("Wrote demo Premiere Pro project to {}", output.display());
         }
-        Commands::Inspect { input, target } => {
+        Commands::Inspect {
+            input,
+            target,
+            json,
+        } => {
             let project = load_project(&input)?;
             let inspection = ProjectInspection::from_project(&project);
             let target_fmt = NleFormat::from_extension(&target).unwrap_or(NleFormat::DaVinciResolve);
             let plan = analyze_project_effects(&project, &[], target_fmt);
+
+            if json {
+                let payload = serde_json::json!({
+                    "inspection": inspection,
+                    "effect_plan": plan,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
 
             println!("Project: {} ({})", inspection.name, inspection.source_format.display_name());
             println!(
@@ -78,46 +124,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 inspection.missing_media_count,
                 inspection.sequences.len()
             );
-            for (idx, seq) in inspection.sequences.iter().enumerate() {
-                let raw_seq = project.sequences.get(idx);
-                let kind_tag = match raw_seq.map(|s| s.kind) {
-                    Some(nle_core::SequenceKind::CompoundClip) => " [Compound]",
-                    Some(nle_core::SequenceKind::MulticamClip) => " [Multicam]",
-                    _ => "",
+            for seq in &inspection.sequences {
+                let kind_tag = match seq.kind {
+                    SequenceKind::CompoundClip => " [Compound]",
+                    SequenceKind::MulticamClip => " [Multicam]",
+                    SequenceKind::Timeline => "",
                 };
-                let trans_count: usize = raw_seq
-                    .map(|s| {
-                        s.video_tracks
-                            .iter()
-                            .chain(s.audio_tracks.iter())
-                            .map(|t| t.transitions.len())
-                            .sum()
-                    })
-                    .unwrap_or(0);
-                let retimed_count: usize = raw_seq
-                    .map(|s| {
-                        s.video_tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .filter(|c| (c.speed_percent - 100.0).abs() > 0.01 || c.reversed)
-                            .count()
-                    })
-                    .unwrap_or(0);
-                let nested_count: usize = raw_seq
-                    .map(|s| {
-                        s.video_tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .filter(|c| c.source_kind != nle_core::ClipSourceKind::Media)
-                            .count()
-                    })
-                    .unwrap_or(0);
                 let mut extras = String::new();
-                if retimed_count > 0 {
-                    extras.push_str(&format!(" | {retimed_count} retimed"));
+                if seq.retimed_clip_count > 0 {
+                    extras.push_str(&format!(" | {} retimed", seq.retimed_clip_count));
                 }
-                if nested_count > 0 {
-                    extras.push_str(&format!(" | {nested_count} compound/multicam/nested"));
+                if seq.nested_clip_count > 0 {
+                    extras.push_str(&format!(
+                        " | {} compound/multicam/nested",
+                        seq.nested_clip_count
+                    ));
                 }
                 println!(
                     "  • {}{} — {}x{} @ {} fps | {} | V:{} ({} clips) A:{} ({} clips) | {} transitions | {} effects{}",
@@ -131,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     seq.video_clip_count,
                     seq.audio_track_count,
                     seq.audio_clip_count,
-                    trans_count,
+                    seq.transition_count,
                     seq.effect_count,
                     extras
                 );
@@ -151,6 +172,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             preset,
             relink,
+            project_name,
+            sequences,
+            flatten_nested,
+            no_bins,
+            no_unused_media,
+            no_markers,
+            no_clip_colors,
+            no_grades,
+            no_fx_markers,
         } => {
             let mut project = load_project(&input)?;
             let target_fmt = output
@@ -159,9 +189,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(NleFormat::from_extension)
                 .unwrap_or(NleFormat::DaVinciResolve);
 
+            let selected_sequence_ids: Vec<String> = if sequences.is_empty() {
+                Vec::new()
+            } else {
+                project
+                    .sequences
+                    .iter()
+                    .filter(|s| {
+                        sequences
+                            .iter()
+                            .any(|q| q == &s.id || q.eq_ignore_ascii_case(&s.name))
+                    })
+                    .map(|s| s.id.clone())
+                    .collect()
+            };
+            if !sequences.is_empty() && selected_sequence_ids.is_empty() {
+                return Err(format!(
+                    "No sequences matched --sequence filter: {}",
+                    sequences.join(", ")
+                )
+                .into());
+            }
+
             let mut options = ConversionOptions {
                 target_format: target_fmt,
-                ..Default::default()
+                project_name,
+                selected_sequence_ids,
+                include_bins: !no_bins,
+                include_unused_media: !no_unused_media,
+                include_markers: !no_markers,
+                include_clip_colors: !no_clip_colors,
+                include_lumetri_grades: !no_grades,
+                inject_effect_review_markers: !no_fx_markers,
+                flatten_nested_and_multicam: flatten_nested,
+                relink_rules: Vec::new(),
             };
             for r in relink {
                 if let Some((from, to)) = r.split_once('=') {
@@ -172,6 +233,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             nle_core::apply_relink_rules(&mut project, &options.relink_rules);
+
+            let mut pre_messages = Vec::new();
+            if options.flatten_nested_and_multicam {
+                let flat = flatten_nested_and_multicam_clips(&mut project);
+                pre_messages.extend(flat.messages);
+                options.flatten_nested_and_multicam = false;
+            }
 
             let plan = analyze_project_effects(&project, &options.selected_sequence_ids, target_fmt);
             let decisions = if let Some(preset_path) = preset {
@@ -201,7 +269,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             report.effect_markers_injected = fx_summary.markers_injected;
-            report.messages.extend(fx_summary.messages);
+            pre_messages.append(&mut report.messages);
+            pre_messages.extend(fx_summary.messages);
+            report.messages = pre_messages;
 
             println!(
                 "Converted {} -> {} ({} sequences, {} video clips, {} audio clips, {} grades, {} markers, {} effect review markers)",
@@ -214,6 +284,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 report.markers_written,
                 report.effect_markers_injected
             );
+            for msg in &report.messages {
+                println!("  [{:?}] {} ({})", msg.severity, msg.message, msg.code);
+            }
         }
     }
     Ok(())

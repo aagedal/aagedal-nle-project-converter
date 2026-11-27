@@ -1,9 +1,9 @@
 use super::time::{file_url_to_path, parse_frame_duration_to_fps, FcpTime};
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance,
-    EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError,
-    NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, SequenceKind,
-    Track, TrackKind, Transition,
+    frames_to_timecode, AlphaMode, Clip, ClipSourceKind, ColorConfig, DataLevels, EffectCategory,
+    EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    RetimeInterpolation, Sequence, SequenceKind, SpeedKeyframe, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node, ParsingOptions};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -279,6 +279,11 @@ impl AssetInfo {
             audio_channels: self.audio_channels,
             audio_sample_rate: self.audio_sample_rate,
             color_space: fmt.color_space,
+            video_codec: None,
+            audio_codec: None,
+            alpha_mode: AlphaMode::Default,
+            data_levels: DataLevels::Auto,
+            pixel_aspect_ratio: None,
             metadata: self.metadata.clone(),
             custom_metadata: BTreeMap::new(),
         }
@@ -940,7 +945,7 @@ impl ParseContext {
             .to_string();
         let enabled = node.attribute("enabled").map(|s| s != "0").unwrap_or(true);
 
-        let (speed_percent, reversed, src_in_frame, src_out_frame) =
+        let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, asset.start, asset_fmt.fps);
 
         let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
@@ -1008,6 +1013,8 @@ impl ParseContext {
                 source_height: asset_fmt.height,
                 speed_percent,
                 reversed,
+                speed_keyframes: speed_keyframes.clone(),
+                retime_interpolation: RetimeInterpolation::Default,
                 enabled,
                 audio_channel: 0,
                 link_group_id: link_group_id.clone(),
@@ -1047,6 +1054,8 @@ impl ParseContext {
                 source_height: asset_fmt.height,
                 speed_percent,
                 reversed,
+                speed_keyframes: speed_keyframes.clone(),
+                retime_interpolation: RetimeInterpolation::Default,
                 enabled,
                 audio_channel: 1,
                 link_group_id,
@@ -1261,7 +1270,7 @@ impl ParseContext {
             .to_string();
         let enabled = parent_enabled && node.attribute("enabled").map(|s| s != "0").unwrap_or(true);
 
-        let (speed_percent, reversed, src_in_frame, src_out_frame) =
+        let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, eff_local_start, eff_dur, asset.start, asset_fmt.fps);
 
         let (own_motion, own_opacity, mut effects) = self.parse_clip_adjustments_and_effects(
@@ -1305,6 +1314,8 @@ impl ParseContext {
             source_height: asset_fmt.height,
             speed_percent,
             reversed,
+            speed_keyframes: speed_keyframes.clone(),
+            retime_interpolation: RetimeInterpolation::Default,
             enabled,
             audio_channel: if is_video { 0 } else { 1 },
             link_group_id: link_group_id.clone(),
@@ -1408,7 +1419,7 @@ impl ParseContext {
             .to_string();
         let enabled = node.attribute("enabled").map(|s| s != "0").unwrap_or(true);
 
-        let (speed_percent, reversed, src_in_frame, src_out_frame) =
+        let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, comp_start, comp_seq.frame_rate);
         let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
             node,
@@ -1443,6 +1454,8 @@ impl ParseContext {
             source_height: comp_seq.height,
             speed_percent,
             reversed,
+            speed_keyframes: speed_keyframes.clone(),
+            retime_interpolation: RetimeInterpolation::Default,
             enabled,
             audio_channel: 0,
             link_group_id: link_group_id.clone(),
@@ -1476,6 +1489,8 @@ impl ParseContext {
                 source_height: comp_seq.height,
                 speed_percent,
                 reversed,
+                speed_keyframes: speed_keyframes.clone(),
+                retime_interpolation: RetimeInterpolation::Default,
                 enabled,
                 audio_channel: 1,
                 link_group_id,
@@ -1559,7 +1574,7 @@ impl ParseContext {
             video_angle = mc_seq.video_tracks.first().map(|t| t.name.clone());
         }
 
-        let (speed_percent, reversed, src_in_frame, src_out_frame) =
+        let (speed_percent, reversed, src_in_frame, src_out_frame, speed_keyframes) =
             parse_retiming_and_source_range(node, local_start, dur_time, mc_start, mc_seq.frame_rate);
         let (motion, opacity, effects) = self.parse_clip_adjustments_and_effects(
             node,
@@ -1594,6 +1609,8 @@ impl ParseContext {
             source_height: mc_seq.height,
             speed_percent,
             reversed,
+            speed_keyframes: speed_keyframes.clone(),
+            retime_interpolation: RetimeInterpolation::Default,
             enabled,
             audio_channel: 0,
             link_group_id: link_group_id.clone(),
@@ -1627,6 +1644,8 @@ impl ParseContext {
                 source_height: mc_seq.height,
                 speed_percent,
                 reversed,
+                speed_keyframes: speed_keyframes.clone(),
+                retime_interpolation: RetimeInterpolation::Default,
                 enabled,
                 audio_channel: 1,
                 link_group_id,
@@ -2237,7 +2256,7 @@ fn parse_retiming_and_source_range(
     dur_time: FcpTime,
     asset_start: FcpTime,
     src_fps: Rational,
-) -> (f64, bool, i64, i64) {
+) -> (f64, bool, i64, i64, Vec<SpeedKeyframe>) {
     let default_in = (local_start - asset_start).to_frames(src_fps).max(0);
     let default_out = ((local_start + dur_time) - asset_start)
         .to_frames(src_fps)
@@ -2247,7 +2266,7 @@ fn parse_retiming_and_source_range(
         .children()
         .find(|n| n.is_element() && n.has_tag_name("timeMap"))
     else {
-        return (100.0, false, default_in, default_out);
+        return (100.0, false, default_in, default_out, Vec::new());
     };
 
     let pts: Vec<(FcpTime, FcpTime)> = tmap
@@ -2261,8 +2280,20 @@ fn parse_retiming_and_source_range(
         .collect();
 
     if pts.len() < 2 {
-        return (100.0, false, default_in, default_out);
+        return (100.0, false, default_in, default_out, Vec::new());
     }
+
+    let speed_keyframes = if pts.len() > 2 {
+        let t0 = pts[0].0;
+        pts.iter()
+            .map(|&(t, v)| SpeedKeyframe {
+                timeline_sec: (t - t0).as_f64().max(0.0),
+                source_sec: (v - asset_start).as_f64().max(0.0),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let (t0, v0) = pts[0];
     let (t1, v1) = *pts.last().unwrap();
@@ -2270,13 +2301,13 @@ fn parse_retiming_and_source_range(
     let dv = (v1 - v0).as_f64();
 
     if dt.abs() < 1e-9 {
-        return (100.0, false, default_in, default_out);
+        return (100.0, false, default_in, default_out, Vec::new());
     }
 
-    if dv.abs() < 1e-6 {
+    if dv.abs() < 1e-6 && speed_keyframes.is_empty() {
         // Freeze frame
         let hold_frame = (v0 - asset_start).to_frames(src_fps).max(0);
-        return (0.0, false, hold_frame, hold_frame + 1);
+        return (0.0, false, hold_frame, hold_frame + 1, Vec::new());
     }
 
     let reversed = dv < 0.0;
@@ -2286,7 +2317,7 @@ fn parse_retiming_and_source_range(
     let src_in = (v_min - asset_start).to_frames(src_fps).max(0);
     let src_out = (v_max - asset_start).to_frames(src_fps).max(src_in + 1);
 
-    (speed, reversed, src_in, src_out)
+    (speed, reversed, src_in, src_out, speed_keyframes)
 }
 
 fn parse_audio_rate(raw: &str) -> Option<u32> {

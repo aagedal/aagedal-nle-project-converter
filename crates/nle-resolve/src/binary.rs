@@ -230,6 +230,38 @@ pub fn encode_wrapper_hex(payload: &[u8]) -> String {
     hex_encode(&buf)
 }
 
+/// Unwrap Resolve's 1-byte flag-prefixed hex blob (`[0x80][protobuf]` or `[0x81][zstd]`),
+/// used by `BtVideoInfo/Radiometry` and `KeyframesBA`.
+pub fn decode_flag_prefixed_hex(hex: &str) -> NleResult<Vec<u8>> {
+    let raw = hex_decode(hex)?;
+    if raw.is_empty() {
+        return Err(NleError::InvalidFormat("Resolve flag-prefixed blob is empty".into()));
+    }
+    match raw[0] {
+        0x80 => Ok(raw[1..].to_vec()),
+        0x81 => {
+            let mut decoder = ruzstd::StreamingDecoder::new(&raw[1..])
+                .map_err(|e| NleError::Archive(format!("Resolve 0x81 zstd init failed: {e}")))?;
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| NleError::Archive(format!("Resolve 0x81 zstd decode failed: {e}")))?;
+            Ok(out)
+        }
+        flag => Err(NleError::InvalidFormat(format!(
+            "Unsupported Resolve flag-prefixed blob flag 0x{flag:02x}"
+        ))),
+    }
+}
+
+/// Wrap raw protobuf bytes with a single `0x80` uncompressed flag byte and encode as hex.
+pub fn encode_flag_prefixed_hex(payload: &[u8]) -> String {
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(0x80);
+    buf.extend_from_slice(payload);
+    hex_encode(&buf)
+}
+
 // ── Resolve Keyed-Dict (FieldsBlob / TracksBA / Sm2TimeMap) ────────────
 
 pub type KeyedFields = BTreeMap<String, (u32, Vec<u8>)>;

@@ -469,6 +469,215 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn fcpxml_writer_enforces_dtd_filter_order_nested_sequences_and_format_names() {
+        let dir = std::env::temp_dir().join("aagedal_fcpxml_dtd_nested_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let xml_path = dir.join("dtd_check.fcpxml");
+
+        let mut c1 = make_clip("c1", "VertClip.mov", "m-vert", "/Volumes/Media/VertClip.mov", 0, 100, 0, 100);
+        c1.source_width = 1080;
+        c1.source_height = 1920;
+        c1.effects.push(EffectInstance {
+            id: "fx1".into(),
+            match_name: "FxPlug:11111111-2222-3333-4444-555555555555".into(),
+            display_name: "Gaussian Blur".into(),
+            category: EffectCategory::Blur,
+            media_kind: TrackKind::Video,
+            enabled: true,
+            is_intrinsic: false,
+            is_animated: false,
+            parameters: vec![],
+        });
+        c1.markers.push(Marker {
+            frame: 10,
+            duration_frames: 1,
+            name: "ClipMark".into(),
+            comment: "".into(),
+            color: "Blue".into(),
+            scope: MarkerScope::Clip,
+        });
+
+        let mut nested_ref = make_clip("c-nested", "Sub_B_Roll", "seq-sub", "", 100, 150, 0, 50);
+        nested_ref.source_kind = ClipSourceKind::NestedSequence;
+
+        let project = Project {
+            name: "DtdTest".into(),
+            source_format: NleFormat::PremierePro,
+            media_assets: vec![
+                MediaAsset {
+                    id: "m-vert".into(),
+                    name: "VertClip.mov".into(),
+                    path: "/Volumes/Media/VertClip.mov".into(),
+                    media_kind: MediaKind::Video,
+                    width: 1080,
+                    height: 1920,
+                    frame_rate: Rational::FPS_23_976,
+                    duration_frames: 200,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 1,
+                    audio_sample_rate: 44_100,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+                MediaAsset {
+                    id: "m-uhd".into(),
+                    name: "UhdClip.mov".into(),
+                    path: "/Volumes/Media/UhdClip.mov".into(),
+                    media_kind: MediaKind::Video,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 100,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 2,
+                    audio_sample_rate: 48_000,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+            ],
+            sequences: vec![
+                Sequence {
+                    id: "seq-sub".into(),
+                    name: "Sub_B_Roll".into(),
+                    kind: SequenceKind::Timeline,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 50,
+                    start_tc_frame: 0,
+                    mark_in: None,
+                    mark_out: None,
+                    video_tracks: vec![Track {
+                        index: 1,
+                        kind: TrackKind::Video,
+                        name: "V1".into(),
+                        enabled: true,
+                        locked: false,
+                        muted: false,
+                        solo: false,
+                        audio_channels: 0,
+                        output_bus_id: None,
+                        clips: vec![make_clip("sub-1", "UhdClip.mov", "m-uhd", "/Volumes/Media/UhdClip.mov", 0, 50, 0, 50)],
+                        transitions: vec![],
+                        markers: vec![],
+                    }],
+                    audio_tracks: vec![],
+                    audio_buses: vec![],
+                    markers: vec![],
+                    metadata: BTreeMap::new(),
+                },
+                Sequence {
+                    id: "seq-main".into(),
+                    name: "Main_Edit".into(),
+                    kind: SequenceKind::Timeline,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 150,
+                    start_tc_frame: 0,
+                    mark_in: None,
+                    mark_out: None,
+                    video_tracks: vec![
+                        Track {
+                            index: 1,
+                            kind: TrackKind::Video,
+                            name: "V1".into(),
+                            enabled: true,
+                            locked: false,
+                            muted: false,
+                            solo: false,
+                            audio_channels: 0,
+                            output_bus_id: None,
+                            clips: vec![c1, nested_ref],
+                            transitions: vec![],
+                            markers: vec![],
+                        },
+                        Track {
+                            index: 2,
+                            kind: TrackKind::Video,
+                            name: "V2".into(),
+                            enabled: true,
+                            locked: false,
+                            muted: false,
+                            solo: false,
+                            audio_channels: 0,
+                            output_bus_id: None,
+                            clips: vec![make_clip("v2-1", "UhdClip.mov", "m-uhd", "/Volumes/Media/UhdClip.mov", 20, 60, 0, 40)],
+                            transitions: vec![],
+                            markers: vec![],
+                        },
+                    ],
+                    audio_tracks: vec![],
+                    audio_buses: vec![],
+                    markers: vec![],
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let opts = ConversionOptions {
+            target_format: NleFormat::FinalCutPro,
+            ..Default::default()
+        };
+        write_fcpxml_file(&project, &xml_path, &opts).expect("write fcpxml");
+        let raw = std::fs::read_to_string(&xml_path).unwrap();
+
+        // 1. Format names: UHD uses FFVideoFormat3840x2160p25; vertical 1080x1920 omits invalid preset name
+        assert!(raw.contains("name=\"FFVideoFormat3840x2160p25\""));
+        assert!(!raw.contains("FFVideoFormat1920p"));
+        assert!(raw.contains("width=\"1080\" height=\"1920\""));
+
+        // 2. Mono & 44.1 kHz audio properties preserved on <asset>
+        assert!(raw.contains("audioChannels=\"1\" audioRate=\"44100\""));
+
+        // 3. Nested sequence emitted as <media> resource and referenced by <ref-clip>
+        assert!(raw.contains("<media id="));
+        assert!(raw.contains("name=\"Sub_B_Roll\""));
+        assert!(raw.contains("<ref-clip "));
+
+        // 4. DTD ordering inside <asset-clip>: connected clip -> <marker> -> <filter-video>
+        let conn_pos = raw.find("lane=\"1\"").expect("connected V2 clip");
+        let marker_pos = raw.find("<marker ").expect("clip marker");
+        let filter_pos = raw.find("<filter-video ").expect("filter-video");
+        assert!(
+            conn_pos < marker_pos && marker_pos < filter_pos,
+            "expected connected clip < marker < filter-video per FCPXML 1.11 DTD, got positions {conn_pos}, {marker_pos}, {filter_pos}"
+        );
+
+        // 5. Round-trip read preserves nested <ref-clip> and filter
+        let reread = read_fcpxml_file(&xml_path).expect("reread fcpxml");
+        let main = reread
+            .sequences
+            .iter()
+            .find(|s| s.name == "Main_Edit")
+            .expect("Main_Edit");
+        assert_eq!(main.video_tracks[0].clips.len(), 2);
+        assert_eq!(main.video_tracks[0].clips[1].source_kind, ClipSourceKind::CompoundClip);
+        assert!(main.video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .any(|e| e.display_name == "Gaussian Blur"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn make_clip(
         id: &str,

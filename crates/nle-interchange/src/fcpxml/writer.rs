@@ -112,15 +112,33 @@ pub fn write_fcpxml_file(
         }
     }
 
-    // 4. Pre-assign <media id="..."> resource IDs for compound & multicam sequences
+    // 4. Pre-assign <media id="..."> resource IDs for compound, multicam, and referenced nested sequences
+    let mut referenced_seq_ids: HashSet<&str> = HashSet::new();
     for seq in &selected {
-        if matches!(
-            seq.kind,
-            SequenceKind::CompoundClip | SequenceKind::MulticamClip
-        ) {
-            res.register_media_sequence(seq);
+        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+            for clip in &track.clips {
+                if clip.source_kind != ClipSourceKind::Media && !clip.media_id.is_empty() {
+                    referenced_seq_ids.insert(clip.media_id.as_str());
+                }
+            }
         }
     }
+    let media_resource_seqs: Vec<&Sequence> = selected
+        .iter()
+        .copied()
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SequenceKind::CompoundClip | SequenceKind::MulticamClip
+            ) || referenced_seq_ids.contains(s.id.as_str())
+        })
+        .collect();
+    for seq in &media_resource_seqs {
+        res.register_media_sequence(seq);
+    }
+
+    // Order <media> definitions dependencies-first so nested <ref-clip>/<mc-clip> references resolve in single pass
+    let ordered_media_seqs = topo_order_sequences(&media_resource_seqs);
 
     // 5. Render <resources>
     let mut xml = String::new();
@@ -132,26 +150,20 @@ pub fn write_fcpxml_file(
     res.write_formats_xml(&mut xml);
     res.write_assets_xml(&mut xml);
 
-    // Emit compound & multicam <media> definitions inside <resources>
+    // Emit compound, nested-sequence, & multicam <media> definitions inside <resources>
     let mut dummy_stats = WriteStats::default();
-    for seq in &selected {
-        match seq.kind {
-            SequenceKind::CompoundClip => {
-                if let Some(mid) = res.media_seq_ids.get(&seq.id).cloned() {
-                    xml.push_str(&format!(
-                        "    <media id=\"{mid}\" name=\"{}\">\n",
-                        xml_escape(&seq.name)
-                    ));
-                    write_sequence_element(seq, &res, options, 6, &mut xml, &mut dummy_stats);
-                    xml.push_str("    </media>\n");
-                }
+    for seq in &ordered_media_seqs {
+        if let Some(mid) = res.media_seq_ids.get(&seq.id).cloned() {
+            if seq.kind == SequenceKind::MulticamClip {
+                write_multicam_media_resource(seq, &mid, &res, options, &mut xml);
+            } else {
+                xml.push_str(&format!(
+                    "    <media id=\"{mid}\" name=\"{}\">\n",
+                    xml_escape(&seq.name)
+                ));
+                write_sequence_element(seq, &res, options, 6, &mut xml, &mut dummy_stats);
+                xml.push_str("    </media>\n");
             }
-            SequenceKind::MulticamClip => {
-                if let Some(mid) = res.media_seq_ids.get(&seq.id).cloned() {
-                    write_multicam_media_resource(seq, &mid, &res, options, &mut xml);
-                }
-            }
-            SequenceKind::Timeline => {}
         }
     }
 
@@ -486,7 +498,7 @@ impl<'a> ResourceRegistry<'a> {
             has_video,
             has_audio,
             audio_channels: if has_audio {
-                ma.audio_channels.max(2)
+                ma.audio_channels.max(1)
             } else {
                 0
             },
@@ -638,10 +650,12 @@ impl<'a> ResourceRegistry<'a> {
     fn write_formats_xml(&self, xml: &mut String) {
         for (key, id, fps) in &self.format_order {
             let frame_dur = FcpTime::from_frames(1, *fps).to_fcpxml_string();
-            let fps_tag = fps.label().replace('.', "");
+            let name_attr = fcpxml_format_name(key.width, key.height, *fps)
+                .map(|n| format!(" name=\"{n}\""))
+                .unwrap_or_default();
             xml.push_str(&format!(
-                "    <format id=\"{id}\" name=\"FFVideoFormat{}p{fps_tag}\" frameDuration=\"{frame_dur}\" width=\"{}\" height=\"{}\"/>\n",
-                key.height, key.width, key.height
+                "    <format id=\"{id}\"{name_attr} frameDuration=\"{frame_dur}\" width=\"{}\" height=\"{}\"/>\n",
+                key.width, key.height
             ));
         }
     }
@@ -668,10 +682,14 @@ impl<'a> ResourceRegistry<'a> {
             }
             xml.push_str(&format!(" hasAudio=\"{has_a}\""));
             if a.has_audio {
+                let sample_rate = if a.audio_sample_rate > 0 {
+                    a.audio_sample_rate
+                } else {
+                    48_000
+                };
                 xml.push_str(&format!(
-                    " audioSources=\"1\" audioChannels=\"{}\" audioRate=\"{}\"",
-                    a.audio_channels.max(1),
-                    a.audio_sample_rate.max(48_000)
+                    " audioSources=\"1\" audioChannels=\"{}\" audioRate=\"{sample_rate}\"",
+                    a.audio_channels.max(1)
                 ));
             }
             xml.push_str(">\n");
@@ -1332,16 +1350,6 @@ fn write_clip_element(
             }
             xml.push_str(&format!("{cpad}<adjust-blend{attrs}/>\n"));
         }
-
-        // 4b. Matched native FCP FxPlug / Motion Effect filters (<filter-video>)
-        for eff in &clip.effects {
-            if let Some((fx_rid, fx_name)) = res.clip_filter_effect_id(eff) {
-                xml.push_str(&format!(
-                    "{cpad}<filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
-                    xml_escape(fx_name)
-                ));
-            }
-        }
     }
 
     // 5. Multicam <mc-source>
@@ -1392,6 +1400,19 @@ fn write_clip_element(
             let m_start = local_start + FcpTime::from_frames(m.frame, seq.frame_rate);
             write_marker_element(m, m_start, seq.frame_rate, indent + 2, xml);
             stats.markers_written += 1;
+        }
+    }
+
+    // 8. Matched native FCP FxPlug / Motion Effect filters (<filter-video>)
+    // Per FCPXML 1.11 DTD, <filter-video> MUST follow <mc-source>, connected clips, and <marker>s.
+    if !is_audio_only {
+        for eff in &clip.effects {
+            if let Some((fx_rid, fx_name)) = res.clip_filter_effect_id(eff) {
+                xml.push_str(&format!(
+                    "{cpad}<filter-video ref=\"{fx_rid}\" name=\"{}\"/>\n",
+                    xml_escape(fx_name)
+                ));
+            }
         }
     }
 
@@ -1584,4 +1605,74 @@ fn fcpxml_tc_format(fps: Rational) -> &'static str {
     } else {
         "NDF"
     }
+}
+
+/// Return Apple's canonical `FFVideoFormat...` preset name for standard raster/rate combinations,
+/// or `None` for custom/vertical/non-standard formats (FCP omits `name` and uses `width`/`height`/`frameDuration`).
+fn fcpxml_format_name(width: u32, height: u32, fps: Rational) -> Option<String> {
+    let f = fps.as_f64();
+    let fps_tag = if (f - 23.976).abs() < 0.02 {
+        "2398"
+    } else if (f - 24.0).abs() < 0.02 {
+        "24"
+    } else if (f - 25.0).abs() < 0.02 {
+        "25"
+    } else if (f - 29.97).abs() < 0.02 {
+        "2997"
+    } else if (f - 30.0).abs() < 0.02 {
+        "30"
+    } else if (f - 50.0).abs() < 0.02 {
+        "50"
+    } else if (f - 59.94).abs() < 0.02 {
+        "5994"
+    } else if (f - 60.0).abs() < 0.02 {
+        "60"
+    } else {
+        return None;
+    };
+    match (width, height) {
+        (1280, 720) => Some(format!("FFVideoFormat720p{fps_tag}")),
+        (1920, 1080) => Some(format!("FFVideoFormat1080p{fps_tag}")),
+        (3840, 2160) => Some(format!("FFVideoFormat3840x2160p{fps_tag}")),
+        (4096, 2160) => Some(format!("FFVideoFormat4096x2160p{fps_tag}")),
+        _ => None,
+    }
+}
+
+/// Order `<media>` resource sequences dependencies-first (cycle-safe DFS postorder).
+fn topo_order_sequences<'a>(seqs: &[&'a Sequence]) -> Vec<&'a Sequence> {
+    let by_id: HashMap<&str, &'a Sequence> = seqs.iter().copied().map(|s| (s.id.as_str(), s)).collect();
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut visiting: HashSet<&str> = HashSet::new();
+    let mut ordered: Vec<&'a Sequence> = Vec::with_capacity(seqs.len());
+
+    fn visit<'a>(
+        seq: &'a Sequence,
+        by_id: &HashMap<&str, &'a Sequence>,
+        visited: &mut HashSet<&'a str>,
+        visiting: &mut HashSet<&'a str>,
+        ordered: &mut Vec<&'a Sequence>,
+    ) {
+        if visited.contains(seq.id.as_str()) || !visiting.insert(seq.id.as_str()) {
+            return;
+        }
+        for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
+            for clip in &track.clips {
+                if clip.source_kind != ClipSourceKind::Media
+                    && let Some(&dep) = by_id.get(clip.media_id.as_str())
+                {
+                    visit(dep, by_id, visited, visiting, ordered);
+                }
+            }
+        }
+        visiting.remove(seq.id.as_str());
+        if visited.insert(seq.id.as_str()) {
+            ordered.push(seq);
+        }
+    }
+
+    for &seq in seqs {
+        visit(seq, &by_id, &mut visited, &mut visiting, &mut ordered);
+    }
+    ordered
 }

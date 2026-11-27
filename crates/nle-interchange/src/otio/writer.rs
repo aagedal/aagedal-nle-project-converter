@@ -61,41 +61,21 @@ pub fn write_otio_file(
             .filter(|s| options.selected_sequence_ids.contains(&s.id))
             .collect()
     };
-    let seq = selected
+
+    let timeline_seqs: Vec<&Sequence> = selected
         .iter()
         .copied()
-        .find(|s| s.kind == SequenceKind::Timeline)
-        .or_else(|| selected.first().copied())
-        .ok_or_else(|| NleError::InvalidFormat("No sequences selected for OTIO export".into()))?;
-
-    let skipped_timelines: Vec<&str> = selected
-        .iter()
-        .filter(|s| s.id != seq.id && s.kind == SequenceKind::Timeline)
-        .map(|s| s.name.as_str())
+        .filter(|s| s.kind == SequenceKind::Timeline)
         .collect();
-    if !skipped_timelines.is_empty() {
-        let preview = skipped_timelines
-            .iter()
-            .take(3)
-            .copied()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let extra = if skipped_timelines.len() > 3 {
-            format!(" (+{} more)", skipped_timelines.len() - 3)
-        } else {
-            String::new()
-        };
-        messages.push(ConversionMessage {
-            severity: Severity::Warning,
-            code: "OTIO_SINGLE_SEQUENCE".into(),
-            message: format!(
-                "OpenTimelineIO (.otio) stores a single timeline per file: exported '{}'; skipped {} other selected timeline(s): {preview}{extra}.",
-                seq.name,
-                skipped_timelines.len()
-            ),
-            sequence: Some(seq.name.clone()),
-            clip: None,
-        });
+    let export_timelines: Vec<&Sequence> = if timeline_seqs.is_empty() {
+        selected
+    } else {
+        timeline_seqs
+    };
+    if export_timelines.is_empty() {
+        return Err(NleError::InvalidFormat(
+            "No sequences selected for OTIO export".into(),
+        ));
     }
 
     let assets_by_id: HashMap<&str, &MediaAsset> = project
@@ -110,6 +90,86 @@ pub fn write_otio_file(
         .map(|a| (a.path.as_str(), a))
         .collect();
 
+    let proj_name = options
+        .project_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&project.name);
+
+    let mut total_v = 0usize;
+    let mut total_a = 0usize;
+    let mut total_markers = 0usize;
+    let mut timelines_json = Vec::with_capacity(export_timelines.len());
+
+    for seq in &export_timelines {
+        let (tl_val, v_cnt, a_cnt, m_cnt) = serialize_timeline(
+            seq,
+            proj_name,
+            options,
+            &assets_by_id,
+            &assets_by_path,
+        );
+        timelines_json.push(tl_val);
+        total_v += v_cnt;
+        total_a += a_cnt;
+        total_markers += m_cnt;
+    }
+
+    let root_doc = if timelines_json.len() == 1 {
+        timelines_json.into_iter().next().unwrap()
+    } else {
+        messages.push(ConversionMessage {
+            severity: Severity::Info,
+            code: "OTIO_SERIALIZABLE_COLLECTION".into(),
+            message: format!(
+                "Exported {} selected timelines into an OpenTimelineIO SerializableCollection.1 container (note: some single-timeline NLE importers only accept a single Timeline.1).",
+                export_timelines.len()
+            ),
+            sequence: None,
+            clip: None,
+        });
+        json!({
+            "OTIO_SCHEMA": "SerializableCollection.1",
+            "name": proj_name,
+            "metadata": {
+                "aagedal_nle_converter": {
+                    "project_name": proj_name
+                }
+            },
+            "children": timelines_json
+        })
+    };
+
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, serde_json::to_string_pretty(&root_doc)?)?;
+
+    Ok(ConversionReport {
+        output_path: output_path.to_string_lossy().into_owned(),
+        source_format: project.source_format,
+        target_format: NleFormat::OpenTimelineIo,
+        sequences_converted: export_timelines.len(),
+        video_clips_converted: total_v,
+        audio_clips_converted: total_a,
+        media_assets_linked: project.media_assets.len(),
+        bins_created: 0,
+        markers_written: total_markers,
+        grades_attached: 0,
+        effect_markers_injected: 0,
+        messages,
+    })
+}
+
+fn serialize_timeline(
+    seq: &Sequence,
+    proj_name: &str,
+    options: &ConversionOptions,
+    assets_by_id: &HashMap<&str, &MediaAsset>,
+    assets_by_path: &HashMap<&str, &MediaAsset>,
+) -> (Value, usize, usize, usize) {
     let rate = seq.frame_rate.as_f64();
     let mut tracks_json = Vec::new();
     let mut total_v = 0usize;
@@ -121,8 +181,8 @@ pub fn write_otio_file(
             track,
             rate,
             options,
-            &assets_by_id,
-            &assets_by_path,
+            assets_by_id,
+            assets_by_path,
         );
         tracks_json.push(track_val);
         total_markers += track_markers_written;
@@ -143,11 +203,6 @@ pub fn write_otio_file(
         Vec::new()
     };
 
-    let proj_name = options
-        .project_name
-        .as_deref()
-        .unwrap_or(&project.name);
-
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": seq.name,
@@ -167,27 +222,7 @@ pub fn write_otio_file(
         }
     });
 
-    if let Some(parent) = output_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(output_path, serde_json::to_string_pretty(&timeline)?)?;
-
-    Ok(ConversionReport {
-        output_path: output_path.to_string_lossy().into_owned(),
-        source_format: project.source_format,
-        target_format: NleFormat::OpenTimelineIo,
-        sequences_converted: 1,
-        video_clips_converted: total_v,
-        audio_clips_converted: total_a,
-        media_assets_linked: project.media_assets.len(),
-        bins_created: 0,
-        markers_written: total_markers,
-        grades_attached: 0,
-        effect_markers_injected: 0,
-        messages,
-    })
+    (timeline, total_v, total_a, total_markers)
 }
 
 fn serialize_marker(m: &nle_core::Marker, rate: f64) -> Value {

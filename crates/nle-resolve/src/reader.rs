@@ -1,7 +1,7 @@
 use crate::audio::{decode_fairlight_mixer, decode_virtual_audio_track, FairlightMixerData};
 use crate::binary::{
-    decode_keyed_fields, decode_protobuf, decode_utf16be, decode_wrapper_hex, hex_decode,
-    ProtoValue,
+    decode_flag_prefixed_hex, decode_keyed_fields, decode_protobuf, decode_utf16be,
+    decode_wrapper_hex, hex_decode, ProtoValue,
 };
 use crate::grade::{has_resolve_stabilization, parse_resolve_grade_nodes};
 use crate::state::{
@@ -236,6 +236,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                     let mut audio_codec: Option<String> = None;
                     let mut audio_channels = 2u32;
                     let mut audio_sample_rate = 48_000u32;
+                    let mut alpha_mode = AlphaMode::Default;
+                    let mut data_levels = DataLevels::Auto;
 
                     if let Some(bvi) = node.descendants().find(|n| n.has_tag_name("BtVideoInfo")) {
                         if let Some(clip_hex) = child_text(bvi, "Clip") {
@@ -257,6 +259,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                             if let Some(f) = fr {
                                 asset_fps = f;
                             }
+                        }
+                        if let Some(rad_hex) = child_text(bvi, "Radiometry") {
+                            let (am, dl) = decode_bt_radiometry(&rad_hex);
+                            alpha_mode = am;
+                            data_levels = dl;
                         }
                     }
 
@@ -310,8 +317,8 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                                 color_space: None,
                                 video_codec,
                                 audio_codec,
-                                alpha_mode: AlphaMode::Default,
-                                data_levels: DataLevels::Auto,
+                                alpha_mode,
+                                data_levels,
                                 pixel_aspect_ratio: None,
                                 metadata: item_std_meta,
                                 custom_metadata: item_custom_meta,
@@ -888,6 +895,43 @@ fn decode_bt_clip_codec(hex: &str) -> Option<String> {
             }
     }
     None
+}
+
+/// Decode Resolve 21.2 `BtVideoInfo/Radiometry` protobuf (`0x80` raw or `0x81` zstd) for:
+/// - `f6` (`Alpha mode`): `1` = Premultiplied, `3` = Straight, `0` = None, omitted = Default/None
+/// - `f13` (`Data Level`): `1` = Video, `2` = Full, `0` / omitted = Auto
+fn decode_bt_radiometry(hex: &str) -> (AlphaMode, DataLevels) {
+    let Ok(raw) = decode_flag_prefixed_hex(hex) else {
+        return (AlphaMode::Default, DataLevels::Auto);
+    };
+    let Ok(fields) = decode_protobuf(&raw) else {
+        return (AlphaMode::Default, DataLevels::Auto);
+    };
+    let mut alpha_mode = AlphaMode::Default;
+    let mut data_levels = DataLevels::Auto;
+    for f in fields {
+        if let ProtoValue::Varint(v) = f.value {
+            match f.number {
+                6 => {
+                    alpha_mode = match v {
+                        0 => AlphaMode::None,
+                        1 => AlphaMode::Premultiplied,
+                        3 => AlphaMode::Straight,
+                        _ => AlphaMode::Default,
+                    };
+                }
+                13 => {
+                    data_levels = match v {
+                        1 => DataLevels::Video,
+                        2 => DataLevels::Full,
+                        _ => DataLevels::Auto,
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    (alpha_mode, data_levels)
 }
 
 fn decode_bt_audio_tracks(hex: &str) -> (Option<u32>, Option<u32>, Option<String>) {

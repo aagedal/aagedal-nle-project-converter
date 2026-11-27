@@ -289,8 +289,10 @@ fn parse_object_at(
             let byte_len = units.checked_mul(2)?;
             let slice = data.get(start..start.checked_add(byte_len)?)?;
             let code_units: Vec<u16> = slice
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
                 .collect();
             Some(PlistValue::String(String::from_utf16_lossy(&code_units)))
         }

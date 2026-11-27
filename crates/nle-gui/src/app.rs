@@ -2,8 +2,8 @@ use crate::about::open_about_window;
 use crate::actions::{
     ApplyRecommendedEffects, CloseProject, CloseWindow, ConvertProject, CopyConversionLog,
     DeselectAllSequences, DismissOverlay, LoadDemoProject, LoadEffectPreset, MinimizeWindow,
-    OpenProject, OpenSettings, OpenShortcuts, RevealOutput, SaveEffectPreset, SelectAllSequences,
-    ZoomWindow, CONVERT_KEYSTROKE, OPEN_PROJECT_KEYSTROKE, SETTINGS_KEYSTROKE,
+    OpenProject, OpenProjectFolder, OpenSettings, OpenShortcuts, RevealOutput, SaveEffectPreset,
+    SelectAllSequences, ZoomWindow, CONVERT_KEYSTROKE, OPEN_PROJECT_KEYSTROKE, SETTINGS_KEYSTROKE,
 };
 use crate::assets;
 use crate::backend::{self, LoadedProject, SUPPORTED_TARGETS};
@@ -28,8 +28,8 @@ use nle_core::{
     ConversionOptions, ConversionReport, NleFormat, PathRelinkRule, SequenceKind, Severity,
 };
 use nle_effects::{
-    analyze_project_effects, DetectedEffectGroup, EffectMappingPreset, InstalledPluginRegistry,
-    MappingAction, MappingFidelity, UserEffectDecisions,
+    analyze_project_effects, CrossNlePluginSummary, DetectedEffectGroup, EffectMappingPreset,
+    InstalledPluginRegistry, MappingAction, MappingFidelity, UserEffectDecisions,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -174,6 +174,7 @@ pub struct ConverterApp {
     error_msg: Option<String>,
     status_toast: Option<String>,
     report: Option<ConversionReport>,
+    cross_plugins: Option<Vec<CrossNlePluginSummary>>,
 }
 
 impl ConverterApp {
@@ -237,11 +238,11 @@ impl ConverterApp {
             &target_select,
             window,
             |this, _select, event: &SelectEvent<Vec<TargetFormatItem>>, window, cx| {
-                if let SelectEvent::Confirm(Some(new_fmt)) = event {
-                    if *new_fmt != this.target_format {
-                        this.target_format = *new_fmt;
-                        this.reanalyze_effects(window, cx);
-                    }
+                if let SelectEvent::Confirm(Some(new_fmt)) = event
+                    && *new_fmt != this.target_format
+                {
+                    this.target_format = *new_fmt;
+                    this.reanalyze_effects(window, cx);
                 }
             },
         );
@@ -272,6 +273,19 @@ impl ConverterApp {
             },
         );
 
+        // Warm up the installed-plugin registry off the UI thread so startup stays instant.
+        cx.spawn_in(window, async move |this, cx| {
+            let plugins = cx
+                .background_executor()
+                .spawn(async move { InstalledPluginRegistry::system().grouped_plugins(2) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.cross_plugins = Some(plugins);
+                cx.notify();
+            });
+        })
+        .detach();
+
         Self {
             focus_handle,
             active_page: ActivePage::Converter,
@@ -298,6 +312,7 @@ impl ConverterApp {
             error_msg: None,
             status_toast: None,
             report: None,
+            cross_plugins: None,
         }
     }
 
@@ -383,6 +398,10 @@ impl ConverterApp {
 
     pub fn trigger_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.on_open_file(window, cx);
+    }
+
+    pub fn trigger_open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_open_folder(window, cx);
     }
 
     pub fn trigger_load_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -687,6 +706,57 @@ impl ConverterApp {
                 dialog = dialog.set_directory(dir);
             }
             let picked = dialog.pick_file().await;
+
+            let Some(handle) = picked else {
+                let _ = this.update(cx, |this, cx| {
+                    this.busy = false;
+                    this.busy_label = None;
+                    cx.notify();
+                });
+                return;
+            };
+
+            let path = handle.path().to_path_buf();
+            let remembered_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { backend::load_and_inspect_project(&path, requested_target) })
+                .await;
+
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                this.busy_label = None;
+                this.remember_directory(&remembered_path, cx);
+                match result {
+                    Ok(payload) => this.apply_loaded_project(payload, window, cx),
+                    Err(err) => {
+                        this.error_msg = Some(err);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn on_open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.busy_label = Some("Opening FCP bundle...".into());
+        self.error_msg = None;
+        let requested_target = self.target_format;
+        let last_dir = self.current_settings(cx).last_dir_path();
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let mut dialog = rfd::AsyncFileDialog::new()
+                .set_title("Open Final Cut Pro Bundle (.fcpbundle or .fcpxmld)");
+            if let Some(dir) = last_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let picked = dialog.pick_folder().await;
 
             let Some(handle) = picked else {
                 let _ = this.update(cx, |this, cx| {
@@ -1152,25 +1222,26 @@ impl ConverterApp {
     }
 
     fn render_hero(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let cross_plugins = InstalledPluginRegistry::system().grouped_plugins(2);
-        let cross_plugin_pill = if cross_plugins.is_empty() {
-            None
-        } else {
-            let names: Vec<&str> = cross_plugins.iter().take(3).map(|p| p.name.as_str()).collect();
-            let suffix = if cross_plugins.len() > 3 {
-                format!(" +{} more", cross_plugins.len() - 3)
-            } else {
-                String::new()
-            };
-            Some(theme::pill(
-                format!(
-                    "{} Cross-NLE Plugins Installed ({}{suffix})",
-                    cross_plugins.len(),
-                    names.join(", ")
-                ),
-                PillTone::Green,
-            ))
-        };
+        let cross_plugin_pill = self
+            .cross_plugins
+            .as_deref()
+            .filter(|plugins| !plugins.is_empty())
+            .map(|cross_plugins| {
+                let names: Vec<&str> = cross_plugins.iter().take(3).map(|p| p.name.as_str()).collect();
+                let suffix = if cross_plugins.len() > 3 {
+                    format!(" +{} more", cross_plugins.len() - 3)
+                } else {
+                    String::new()
+                };
+                theme::pill(
+                    format!(
+                        "{} Cross-NLE Plugins Installed ({}{suffix})",
+                        cross_plugins.len(),
+                        names.join(", ")
+                    ),
+                    PillTone::Green,
+                )
+            });
 
         div()
             .w_full()
@@ -1221,6 +1292,14 @@ impl ConverterApp {
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.on_open_file(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("hero-open-bundle")
+                                    .label("Open .fcpbundle / .fcpxmld")
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_open_folder(window, cx);
                                     })),
                             )
                             .child(
@@ -2195,6 +2274,9 @@ impl Render for ConverterApp {
             }))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
                 this.on_open_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenProjectFolder, window, cx| {
+                this.on_open_folder(window, cx);
             }))
             .on_action(cx.listener(|this, _: &LoadDemoProject, window, cx| {
                 this.on_load_demo(window, cx);

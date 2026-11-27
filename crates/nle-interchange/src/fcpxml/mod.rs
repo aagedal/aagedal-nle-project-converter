@@ -469,6 +469,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_clip(
         id: &str,
         name: &str,

@@ -131,11 +131,9 @@ pub fn parse_fcpxml_str(xml: &str, default_name: &str) -> NleResult<Project> {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .filter(|s| !s.is_empty())
-            {
-                if project_name.is_empty() || project_name == "Info" {
+                && (project_name.is_empty() || project_name == "Info") {
                     project_name = stem.to_string();
                 }
-            }
         }
         for ev in lib.children().filter(|n| n.is_element() && n.has_tag_name("event")) {
             ctx.parse_event(ev, &mut bins, &mut sequences);
@@ -696,8 +694,8 @@ impl ParseContext {
                     }
                 }
                 "ref-clip" | "mc-clip" => {
-                    if let Some(rid) = child.attribute("ref") {
-                        if let Some(mdef) = self.media_defs.get(rid) {
+                    if let Some(rid) = child.attribute("ref")
+                        && let Some(mdef) = self.media_defs.get(rid) {
                             let sid = match mdef {
                                 MediaDef::Compound(s) => s.id.clone(),
                                 MediaDef::Multicam { seq, .. } => seq.id.clone(),
@@ -706,7 +704,6 @@ impl ParseContext {
                                 sequence_ids.push(sid);
                             }
                         }
-                    }
                 }
                 _ => {}
             }
@@ -752,11 +749,10 @@ impl ParseContext {
             .and_then(|fid| self.formats.get(fid))
             .cloned()
             .unwrap_or_default();
-        if kind == SequenceKind::Timeline && self.primary_color_space.is_none() {
-            if let Some(cs) = &fmt.color_space {
+        if kind == SequenceKind::Timeline && self.primary_color_space.is_none()
+            && let Some(cs) = &fmt.color_space {
                 self.primary_color_space = Some(cs.clone());
             }
-        }
 
         let tc_start = seq_node
             .attribute("tcStart")
@@ -1885,25 +1881,23 @@ impl ParseContext {
                             motion.position_y = fy / 100.0;
                         }
                     }
-                    if let Some(sc) = child.attribute("scale") {
-                        if let Some((sx, sy)) = parse_f64_pair(sc) {
+                    if let Some(sc) = child.attribute("scale")
+                        && let Some((sx, sy)) = parse_f64_pair(sc) {
                             motion.scale = sx * 100.0;
                             if (sx - sy).abs() > 1e-4 {
                                 motion.scale_y = Some(sy * 100.0);
                             }
                         }
-                    }
                     if let Some(rot) = child.attribute("rotation").and_then(|s| s.parse::<f64>().ok())
                     {
                         // FCPXML rotation is CCW-positive; IR rotation is CW-positive (Premiere convention)
                         motion.rotation = -rot;
                     }
-                    if let Some(anc) = child.attribute("anchor") {
-                        if let Some((ax, ay)) = parse_f64_pair(anc) {
+                    if let Some(anc) = child.attribute("anchor")
+                        && let Some((ax, ay)) = parse_f64_pair(anc) {
                             motion.anchor_x = (ax / 100.0) / aspect;
                             motion.anchor_y = -(ay / 100.0);
                         }
-                    }
                     if has_keyframe_animation(child) {
                         motion.has_keyframes = true;
                     }

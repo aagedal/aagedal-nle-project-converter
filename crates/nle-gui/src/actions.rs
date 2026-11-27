@@ -17,6 +17,7 @@ gpui_kit::actions!(
         OpenSettings,
         OpenShortcuts,
         OpenProject,
+        OpenProjectFolder,
         LoadDemoProject,
         ConvertProject,
         CloseProject,
@@ -60,6 +61,12 @@ pub const SHORTCUT_CATALOG: &[ShortcutEntry] = &[
         label: "Open Project",
         description: "Open a .prproj, .drp, .drt, .fcpbundle, or .fcpxml file",
         keystroke: primary_key!("o"),
+    },
+    ShortcutEntry {
+        category: "File & Project",
+        label: "Open FCP Bundle / Folder",
+        description: "Select a .fcpbundle or .fcpxmld package folder directly",
+        keystroke: primary_key!("shift-o"),
     },
     ShortcutEntry {
         category: "File & Project",
@@ -177,6 +184,7 @@ pub fn bind_default_keys(cx: &mut App) {
         KeyBinding::new(primary_key!(","), OpenSettings, None),
         KeyBinding::new(primary_key!("/"), OpenShortcuts, None),
         KeyBinding::new(primary_key!("o"), OpenProject, None),
+        KeyBinding::new(primary_key!("shift-o"), OpenProjectFolder, None),
         KeyBinding::new(primary_key!("shift-d"), LoadDemoProject, None),
         KeyBinding::new(primary_key!("s"), ConvertProject, None),
         KeyBinding::new(primary_key!("e"), ConvertProject, None),
@@ -234,6 +242,7 @@ pub fn build_app_menus() -> Vec<Menu> {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open Project...", OpenProject),
+                MenuItem::action("Open FCP Bundle / Folder...", OpenProjectFolder),
                 MenuItem::action("Load Demo Project", LoadDemoProject),
                 MenuItem::separator(),
                 MenuItem::action("Convert & Save...", ConvertProject),

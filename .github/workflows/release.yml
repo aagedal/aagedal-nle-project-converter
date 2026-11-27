@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0-alpha.1)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package-macos:
+    name: macOS (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build and package macOS app & DMG
+        run: |
+          chmod +x scripts/package_macos.sh
+          ./scripts/package_macos.sh --target ${{ matrix.target }}
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+
+  package-cli:
+    name: CLI (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-cli-${{ matrix.target }}
+      - name: Build CLI release binary
+        run: cargo build --release -p nle-cli --target ${{ matrix.target }}
+      - name: Archive CLI release (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VERSION="$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          STAGE="dist/nle-convert-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/nle-convert" "$STAGE/"
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$STAGE/"
+          tar -czf "dist/nle-convert-${VERSION}-${{ matrix.target }}.tar.gz" -C dist "$(basename "$STAGE")"
+      - name: Archive CLI release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $stage = "dist\nle-convert-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\nle-convert.exe" $stage
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $stage
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\nle-convert-$version-${{ matrix.target }}.zip" -Force
+      - name: Upload CLI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-cli-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [package-macos, package-cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "$TAG_NAME" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG_NAME" release-assets/* \
+            --title "Aagedal NLE Project Converter ${TAG_NAME}" \
+            --generate-notes \
+            $PRERELEASE_FLAG

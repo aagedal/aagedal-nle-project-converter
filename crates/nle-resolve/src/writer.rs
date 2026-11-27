@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -96,13 +97,11 @@ pub fn write_drp_file(
         scan_idx += 1;
         for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
             for clip in &track.clips {
-                if clip.source_kind != ClipSourceKind::Media && !clip.media_id.is_empty() {
-                    if let Some(&dep_seq) = seq_by_id.get(clip.media_id.as_str()) {
-                        if selected_ids.insert(dep_seq.id.as_str()) {
+                if clip.source_kind != ClipSourceKind::Media && !clip.media_id.is_empty()
+                    && let Some(&dep_seq) = seq_by_id.get(clip.media_id.as_str())
+                        && selected_ids.insert(dep_seq.id.as_str()) {
                             selected_sequences.push(dep_seq);
                         }
-                    }
-                }
             }
         }
     }
@@ -802,11 +801,15 @@ pub fn write_drp_file(
 
             // Update sequence names
             let escaped_seq_name = xml_escape(&seq.name);
-            let re_tl_name = Regex::new(r"(?s)(<Sm2Timeline\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
+            static RE_TL_NAME: OnceLock<Regex> = OnceLock::new();
+            let re_tl_name = RE_TL_NAME
+                .get_or_init(|| Regex::new(r"(?s)(<Sm2Timeline\b[^>]*>.*?<Name>).*?(</Name>)").unwrap());
             tl_block = re_tl_name
                 .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
                 .into_owned();
-            let re_mp_name = Regex::new(r"(?s)(<Sm2MpTimelineClip\b[^>]*>.*?<Name>).*?(</Name>)").unwrap();
+            static RE_MP_NAME: OnceLock<Regex> = OnceLock::new();
+            let re_mp_name = RE_MP_NAME
+                .get_or_init(|| Regex::new(r"(?s)(<Sm2MpTimelineClip\b[^>]*>.*?<Name>).*?(</Name>)").unwrap());
             tl_block = re_mp_name
                 .replace(&tl_block, format!("${{1}}{escaped_seq_name}${{2}}"))
                 .into_owned();
@@ -849,7 +852,11 @@ pub fn write_drp_file(
             let needs_custom_setup =
                 seq.width != default_w || seq.height != default_h || seq_fps_int != default_fps_int;
             if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() || needs_custom_setup {
-                let re_seq_blob = Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
+                static RE_SEQ_BLOB: OnceLock<Regex> = OnceLock::new();
+                let re_seq_blob = RE_SEQ_BLOB.get_or_init(|| {
+                    Regex::new(r"(?s)(<Sm2Sequence\b[^>]*>.*?<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)")
+                        .unwrap()
+                });
                 if let Some(caps) = re_seq_blob.captures(&tl_block) {
                     let mut blob_bytes = hex_decode(&caps[2])?;
                     if !seq.audio_tracks.is_empty() || !seq.audio_buses.is_empty() {
@@ -878,13 +885,7 @@ pub fn write_drp_file(
                                     .as_deref()
                                     .and_then(|pid| bus_idx_by_id.get(pid).copied())
                                     .filter(|&p| p != i)
-                                    .or_else(|| {
-                                        if i > 0 && !b.is_main {
-                                            Some(0)
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                    .or(if i > 0 && !b.is_main { Some(0) } else { None });
                                 FairlightBusSpec {
                                     name: b.name.clone(),
                                     is_main: b.is_main || parent_idx.is_none(),
@@ -924,15 +925,14 @@ pub fn write_drp_file(
                             }
                         }
                     }
-                    if needs_custom_setup {
-                        if let Ok(mut kfields) = decode_keyed_fields(&blob_bytes) {
+                    if needs_custom_setup
+                        && let Ok(mut kfields) = decode_keyed_fields(&blob_bytes) {
                             kfields.retain(|(k, _, _)| k != "SequenceSetup");
                             let setup_blob = build_sequence_setup_blob(seq.width, seq.height, seq_fps_int);
                             let insert_pos = usize::from(!kfields.is_empty());
                             kfields.insert(insert_pos, ("SequenceSetup".into(), 12, setup_blob));
                             blob_bytes = encode_keyed_fields(&kfields);
                         }
-                    }
                     let m = caps.get(2).unwrap();
                     let mut updated = String::with_capacity(tl_block.len());
                     updated.push_str(&tl_block[..m.start()]);
@@ -1023,13 +1023,12 @@ pub fn write_drp_file(
                 .push(folder_id);
         }
 
-        if let Some(master_children) = children_by_parent.get(&master_id) {
-            if let Some(orig_master_blob) = extract_tag_inner(&base_pool, "FieldsBlob") {
+        if let Some(master_children) = children_by_parent.get(&master_id)
+            && let Some(orig_master_blob) = extract_tag_inner(&base_pool, "FieldsBlob") {
                 let updated_master_blob =
                     inject_child_folders_into_blob(&orig_master_blob, master_children);
                 base_pool = set_child_text(&base_pool, "FieldsBlob", &updated_master_blob);
             }
-        }
 
         let mut media_to_bin: HashMap<String, String> = HashMap::new();
         let mut seq_to_bin: HashMap<String, String> = HashMap::new();
@@ -1144,11 +1143,10 @@ pub fn write_drp_file(
     members.insert("project.xml".into(), project_xml.into_bytes());
 
     // Write final .drp ZIP archive
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     let file = File::create(output_path)?;
     let mut zip = ZipWriter::new(file);
     let zip_opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -1383,12 +1381,11 @@ fn ensure_media_pool_item(
     )?;
     node = rewritten;
 
-    if let (Some(a), Some(info_id)) = (asset, primary_info_id.as_deref()) {
-        if let Some(blob) = media_metadata_lockable_blob_xml(info_id, &a.metadata, &a.custom_metadata)
+    if let (Some(a), Some(info_id)) = (asset, primary_info_id.as_deref())
+        && let Some(blob) = media_metadata_lockable_blob_xml(info_id, &a.metadata, &a.custom_metadata)
         {
             lockable_blobs.push(blob);
         }
-    }
 
     media_pool_entries.push((
         pkey.to_string(),
@@ -1474,13 +1471,12 @@ fn ensure_media_pool_asset(
     )?;
     node = rewritten;
 
-    if let Some(info_id) = primary_info_id.as_deref() {
-        if let Some(blob) =
+    if let Some(info_id) = primary_info_id.as_deref()
+        && let Some(blob) =
             media_metadata_lockable_blob_xml(info_id, &asset.metadata, &asset.custom_metadata)
         {
             lockable_blobs.push(blob);
         }
-    }
 
     media_pool_entries.push((
         pkey.to_string(),
@@ -1535,8 +1531,8 @@ fn rewrite_media_pool_av_blobs(
             }
             block = replace_attr_first(&block, info_tag, "DbId", &new_info_id);
 
-            if info_tag == "BtVideoInfo" {
-                if let Some(cs) = color_space {
+            if info_tag == "BtVideoInfo"
+                && let Some(cs) = color_space {
                     let csl = cs.to_ascii_lowercase();
                     if csl.contains("pq") || csl.contains("2084") {
                         // Verified Resolve 21.2 10-bit BT.2100 PQ <Radiometry> protobuf
@@ -1546,11 +1542,10 @@ fn rewrite_media_pool_av_blobs(
                         block = set_child_text(&block, "Radiometry", RADIOMETRY_BT2100_PQ);
                     }
                 }
-            }
 
-            if let Some(clip_hex) = extract_tag_inner(&block, "Clip") {
-                if let Ok(raw) = decode_wrapper_hex(&clip_hex) {
-                    if let Ok(mut fields) = decode_protobuf(&raw) {
+            if let Some(clip_hex) = extract_tag_inner(&block, "Clip")
+                && let Ok(raw) = decode_wrapper_hex(&clip_hex)
+                    && let Ok(mut fields) = decode_protobuf(&raw) {
                         let desired_codec = if info_tag == "BtVideoInfo" {
                             video_codec
                         } else {
@@ -1581,24 +1576,21 @@ fn rewrite_media_pool_av_blobs(
                         if desired_codec.is_none() {
                             // Strip placeholder codec (e.g. template "avc1" / "AAC") so Resolve probes accurately
                             fields.retain(|f| f.number != 5);
-                        } else if !saw_codec_field {
-                            if let Some(c) = desired_codec {
+                        } else if !saw_codec_field
+                            && let Some(c) = desired_codec {
                                 let insert_pos = fields
                                     .iter()
                                     .position(|f| f.number > 5)
                                     .unwrap_or(fields.len());
                                 fields.insert(insert_pos, ProtoField::bytes(5, c.as_bytes().to_vec()));
                             }
-                        }
                         let new_hex = encode_wrapper_hex(&encode_protobuf(&fields));
                         block = set_child_text(&block, "Clip", &new_hex);
                     }
-                }
-            }
 
             if info_tag == "BtVideoInfo" {
-                if let Some(time_hex) = extract_tag_inner(&block, "Time") {
-                    if let Ok(mut raw) = hex_decode(&time_hex) {
+                if let Some(time_hex) = extract_tag_inner(&block, "Time")
+                    && let Ok(mut raw) = hex_decode(&time_hex) {
                         patch_utf16_keyed_bytes(
                             &mut raw,
                             "StartFrame",
@@ -1622,10 +1614,9 @@ fn rewrite_media_pool_av_blobs(
                         }
                         block = set_child_text(&block, "Time", &hex_encode(&raw));
                     }
-                }
-                if width > 0 && height > 0 {
-                    if let Some(geo_hex) = extract_tag_inner(&block, "Geometry") {
-                        if let Ok(mut raw) = hex_decode(&geo_hex) {
+                if width > 0 && height > 0
+                    && let Some(geo_hex) = extract_tag_inner(&block, "Geometry")
+                        && let Ok(mut raw) = hex_decode(&geo_hex) {
                             let mut res = Vec::with_capacity(20);
                             res.extend_from_slice(&16u32.to_be_bytes());
                             res.extend_from_slice(&(width as u64).to_be_bytes());
@@ -1633,12 +1624,10 @@ fn rewrite_media_pool_av_blobs(
                             patch_utf16_keyed_bytes(&mut raw, "Resolution", 12, &res);
                             block = set_child_text(&block, "Geometry", &hex_encode(&raw));
                         }
-                    }
-                }
-            } else if info_tag == "BtAudioInfo" && duration > 0 && fps > 0.0 {
-                if let Some(tracks_hex) = extract_tag_inner(&block, "TracksBA") {
-                    if let Ok(raw) = hex_decode(&tracks_hex) {
-                        if let Ok(mut phys) = decode_keyed_fields(&raw) {
+            } else if info_tag == "BtAudioInfo" && duration > 0 && fps > 0.0
+                && let Some(tracks_hex) = extract_tag_inner(&block, "TracksBA")
+                    && let Ok(raw) = hex_decode(&tracks_hex)
+                        && let Ok(mut phys) = decode_keyed_fields(&raw) {
                             for (_, _, track_raw) in &mut phys {
                                 if let Ok(mut tfields) = decode_keyed_fields(track_raw) {
                                     let rate = if sample_rate > 0 { sample_rate } else { 48_000 };
@@ -1651,11 +1640,10 @@ fn rewrite_media_pool_av_blobs(
                                             *v = sample_dur.to_be_bytes().to_vec();
                                         } else if k == "NumChannels" && (is_standalone_audio || audio_channels > 0) {
                                             *v = ch.to_be_bytes().to_vec();
-                                        } else if k == "CodecName" {
-                                            if let Some(ac) = audio_codec {
+                                        } else if k == "CodecName"
+                                            && let Some(ac) = audio_codec {
                                                 *v = encode_utf16be(ac);
                                             }
-                                        }
                                     }
                                     if audio_codec.is_none() {
                                         tfields.retain(|(k, _, _)| k != "CodecName");
@@ -1665,17 +1653,18 @@ fn rewrite_media_pool_av_blobs(
                             }
                             block = set_child_text(&block, "TracksBA", &hex_encode(&encode_keyed_fields(&phys)));
                         }
-                    }
-                }
-            }
 
             out = out.replacen(&orig_block, &block, 1);
 
             // Rewrite UTF-16LE MediaRef DbId inside the root clip's <FieldsBlob>
             if !old_info_id.is_empty() {
-                let re_root_blob = Regex::new(r"(?s)(<Sm2Mp(?:Video|Audio)Clip\b[^>]*>\s*<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)").unwrap();
-                if let Some(caps) = re_root_blob.captures(&out) {
-                    if let Ok(raw) = decode_wrapper_hex(&caps[2]) {
+                static RE_ROOT_BLOB: OnceLock<Regex> = OnceLock::new();
+                let re_root_blob = RE_ROOT_BLOB.get_or_init(|| {
+                    Regex::new(r"(?s)(<Sm2Mp(?:Video|Audio)Clip\b[^>]*>\s*<FieldsBlob>)([0-9a-fA-F]+)(</FieldsBlob>)")
+                        .unwrap()
+                });
+                if let Some(caps) = re_root_blob.captures(&out)
+                    && let Ok(raw) = decode_wrapper_hex(&caps[2]) {
                         let old_u16 = encode_utf16le(&old_info_id);
                         let new_u16 = encode_utf16le(&new_info_id);
                         let updated_raw = replace_subslice(&raw, &old_u16, &new_u16);
@@ -1686,7 +1675,6 @@ fn rewrite_media_pool_av_blobs(
                         next.push_str(&out[m.end()..]);
                         out = next;
                     }
-                }
             }
         }
     }

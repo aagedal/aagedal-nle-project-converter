@@ -12,7 +12,8 @@ mod theme;
 use actions::{
     ApplyRecommendedEffects, CloseProject, ConvertProject, CopyConversionLog, DeselectAllSequences,
     HideApp, HideOtherApps, LoadDemoProject, LoadEffectPreset, OpenAbout, OpenProject,
-    OpenSettings, OpenShortcuts, Quit, RevealOutput, SaveEffectPreset, SelectAllSequences,
+    OpenProjectFolder, OpenSettings, OpenShortcuts, Quit, RevealOutput, SaveEffectPreset,
+    SelectAllSequences,
 };
 use app::ConverterApp;
 use gpui_kit::*;
@@ -69,6 +70,9 @@ fn main() {
             });
             cx.on_action(|_: &OpenProject, cx| {
                 dispatch_to_main_window(cx, |app, window, cx| app.trigger_open_file(window, cx));
+            });
+            cx.on_action(|_: &OpenProjectFolder, cx| {
+                dispatch_to_main_window(cx, |app, window, cx| app.trigger_open_folder(window, cx));
             });
             cx.on_action(|_: &LoadDemoProject, cx| {
                 dispatch_to_main_window(cx, |app, window, cx| app.trigger_load_demo(window, cx));

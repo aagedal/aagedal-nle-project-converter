@@ -16,7 +16,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// Decode a hex string into bytes.
 pub fn hex_decode(s: &str) -> NleResult<Vec<u8>> {
     let trimmed = s.trim();
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err(NleError::InvalidFormat("Odd-length hex string in Resolve blob".into()));
     }
     let mut out = Vec::with_capacity(trimmed.len() / 2);
@@ -55,11 +55,11 @@ pub fn encode_utf16le(s: &str) -> Vec<u8> {
 }
 
 pub fn decode_utf16be(bytes: &[u8]) -> NleResult<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(NleError::InvalidFormat("Odd-length UTF-16BE slice".into()));
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16(&units)
@@ -252,7 +252,7 @@ pub fn decode_keyed_fields(data: &[u8]) -> NleResult<Vec<(String, u32, Vec<u8>)>
         }
         let key_len = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
-        if key_len % 2 != 0 || offset + key_len + 5 > data.len() {
+        if !key_len.is_multiple_of(2) || offset + key_len + 5 > data.len() {
             return Err(NleError::InvalidFormat("Invalid keyed field key bounds".into()));
         }
         let key = decode_utf16be(&data[offset..offset + key_len])?;

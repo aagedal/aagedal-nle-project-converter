@@ -162,12 +162,11 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
         {
             continue;
         }
-        if let Some(asset) = extract_media_asset(media_node, &by_id) {
-            if !media_map.contains_key(&asset.id) && !known_paths.contains(&asset.path) {
+        if let Some(asset) = extract_media_asset(media_node, &by_id)
+            && !media_map.contains_key(&asset.id) && !known_paths.contains(&asset.path) {
                 known_paths.insert(asset.path.clone());
                 media_map.insert(asset.id.clone(), asset);
             }
-        }
     }
 
     // Merge ClipProjectItem standard + custom metadata onto every matching MediaAsset
@@ -183,8 +182,8 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
                     .or_insert_with(|| v.clone());
             }
         }
-        if !asset.path.is_empty() {
-            if let Some((sm, cm)) = meta_by_path.get(&asset.path) {
+        if !asset.path.is_empty()
+            && let Some((sm, cm)) = meta_by_path.get(&asset.path) {
                 for (k, v) in sm {
                     asset.metadata.entry(k.clone()).or_insert_with(|| v.clone());
                 }
@@ -195,7 +194,6 @@ pub fn parse_prproj_xml(xml_text: &str, project_name: &str) -> NleResult<Project
                         .or_insert_with(|| v.clone());
                 }
             }
-        }
     }
 
     Ok(Project {
@@ -219,19 +217,17 @@ fn extract_color_config(root: Node<'_, '_>) -> ColorConfig {
     for node in root.descendants().filter(|n| n.is_element()) {
         let tag = node.tag_name().name();
         if tag == "WorkingColorSpace" || tag == "WorkingColorSpaceConfiguration" {
-            if working.is_none() {
-                if let Some(text) = node.text().filter(|t| !t.trim().is_empty()) {
+            if working.is_none()
+                && let Some(text) = node.text().filter(|t| !t.trim().is_empty()) {
                     working = Some(decode_color_profile_name(
                         text,
                         tag == "WorkingColorSpaceConfiguration",
                     ));
                 }
-            }
-        } else if tag == "OutputColorSpace" && output.is_none() {
-            if let Some(text) = node.text().filter(|t| !t.trim().is_empty()) {
+        } else if tag == "OutputColorSpace" && output.is_none()
+            && let Some(text) = node.text().filter(|t| !t.trim().is_empty()) {
                 output = Some(decode_color_profile_name(text, false));
             }
-        }
     }
 
     ColorConfig {
@@ -242,11 +238,10 @@ fn extract_color_config(root: Node<'_, '_>) -> ColorConfig {
 
 fn decode_color_profile_name(raw: &str, is_config: bool) -> String {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
-        if is_config {
-            if let Some(s) = val.get("workingSpaceID").and_then(|v| v.as_str()) {
+        if is_config
+            && let Some(s) = val.get("workingSpaceID").and_then(|v| v.as_str()) {
                 return s.to_string();
             }
-        }
         if let Some(s) = val
             .get("baseColorProfile")
             .and_then(|b| b.get("colorProfileName"))
@@ -263,16 +258,14 @@ fn resolve_node<'a, 'input>(
     by_id: &HashMap<&str, Node<'a, 'input>>,
     by_uid: &HashMap<&str, Node<'a, 'input>>,
 ) -> Option<Node<'a, 'input>> {
-    if let Some(uref) = ref_el.attribute("ObjectURef") {
-        if let Some(n) = by_uid.get(uref) {
+    if let Some(uref) = ref_el.attribute("ObjectURef")
+        && let Some(n) = by_uid.get(uref) {
             return Some(*n);
         }
-    }
-    if let Some(oref) = ref_el.attribute("ObjectRef") {
-        if let Some(n) = by_id.get(oref) {
+    if let Some(oref) = ref_el.attribute("ObjectRef")
+        && let Some(n) = by_id.get(oref) {
             return Some(*n);
         }
-    }
     None
 }
 
@@ -437,11 +430,10 @@ fn extract_clip_project_item_metadata(
             if let Some(mip_t) = mip.filter(|&v| v >= 0) {
                 log_tc_frame = Some(fps_for_log.adobe_ticks_to_frames(mip_t));
             }
-            if let (Some(mip_t), Some(mop_t)) = (mip, mop) {
-                if mop_t > mip_t {
+            if let (Some(mip_t), Some(mop_t)) = (mip, mop)
+                && mop_t > mip_t {
                     log_dur_frames = Some(fps_for_log.adobe_ticks_to_frames(mop_t - mip_t));
                 }
-            }
         }
 
         // Resolve the primary Media node referenced by this MasterClip (prefer VideoClip over AudioClip)
@@ -477,11 +469,10 @@ fn extract_clip_project_item_metadata(
 
         // Ensure unplaced bin media items exist in media_map with accurate properties
         if let Some(mut asset) = extract_media_asset(media_node, by_id) {
-            if let Some(f) = log_fps {
-                if asset.frame_rate == Rational::FPS_25 && f != Rational::FPS_25 {
+            if let Some(f) = log_fps
+                && asset.frame_rate == Rational::FPS_25 && f != Rational::FPS_25 {
                     asset.frame_rate = f;
                 }
-            }
             if let Some(tc) = log_tc_frame {
                 asset.source_tc_frame = tc;
                 asset.source_tc_string = frames_to_timecode(tc, asset.frame_rate);
@@ -527,13 +518,11 @@ fn extract_bins(
         };
         if let Some(items) = find_descendant(*parent, "Items") {
             for item in items.children().filter(|n| n.has_tag_name("Item")) {
-                if let Some(child) = resolve_node(item, by_id, by_uid) {
-                    if child.has_tag_name("BinProjectItem") {
-                        if let Some(cuid) = child.attribute("ObjectUID") {
+                if let Some(child) = resolve_node(item, by_id, by_uid)
+                    && child.has_tag_name("BinProjectItem")
+                        && let Some(cuid) = child.attribute("ObjectUID") {
                             parent_by_uid.insert(cuid.to_string(), puid.to_string());
                         }
-                    }
-                }
             }
         }
     }
@@ -577,11 +566,10 @@ fn extract_bins(
                         if !sequence_ids.contains(&seq_uid) {
                             sequence_ids.push(seq_uid);
                         }
-                    } else if let Some((path, _, _)) = find_media_for_clip(clip_el, by_id, by_uid) {
-                        if !path.is_empty() && !media_paths.contains(&path) {
+                    } else if let Some((path, _, _)) = find_media_for_clip(clip_el, by_id, by_uid)
+                        && !path.is_empty() && !media_paths.contains(&path) {
                             media_paths.push(path);
                         }
-                    }
                 }
             }
         }
@@ -655,11 +643,10 @@ fn extract_link_groups(
         let group_id = format!("link-{idx}");
         if let Some(items) = find_descendant(link_el, "TrackItems") {
             for ti in items.children().filter(|n| n.has_tag_name("TrackItem")) {
-                if let Some(oref) = ti.attribute("ObjectRef") {
-                    if by_id.contains_key(oref) {
+                if let Some(oref) = ti.attribute("ObjectRef")
+                    && by_id.contains_key(oref) {
                         track_item_to_group.insert(oref.to_string(), group_id.clone());
                     }
-                }
             }
         }
     }
@@ -843,11 +830,10 @@ fn parse_sequence(
                 if let Some(w) = p.text().and_then(|t| t.trim().parse::<u32>().ok()).filter(|&v| v > 0) {
                     width = w;
                 }
-            } else if tag.contains("PreviewFrameSizeHeight") {
-                if let Some(h) = p.text().and_then(|t| t.trim().parse::<u32>().ok()).filter(|&v| v > 0) {
+            } else if tag.contains("PreviewFrameSizeHeight")
+                && let Some(h) = p.text().and_then(|t| t.trim().parse::<u32>().ok()).filter(|&v| v > 0) {
                     height = h;
                 }
-            }
         }
     }
 
@@ -901,8 +887,8 @@ fn parse_sequence(
     let mut audio_tracks = Vec::new();
     let mut max_end = 0i64;
 
-    if let Some(vtg) = video_tg {
-        if let Some(tracks_el) = find_descendant(vtg, "Tracks") {
+    if let Some(vtg) = video_tg
+        && let Some(tracks_el) = find_descendant(vtg, "Tracks") {
             for (idx, track_ref) in tracks_el
                 .children()
                 .filter(|n| n.has_tag_name("Track"))
@@ -929,7 +915,6 @@ fn parse_sequence(
                 video_tracks.push(track);
             }
         }
-    }
 
     let mut audio_buses = Vec::new();
     let mut track_uid_to_bus_id: HashMap<String, String> = HashMap::new();
@@ -986,8 +971,7 @@ fn parse_sequence(
                 .children()
                 .find(|n| n.has_tag_name("Inlet"))
                 .and_then(|r| resolve_node(r, by_id, by_uid))
-            {
-                if let Some(sources) = inlet.children().find(|n| n.has_tag_name("Sources")) {
+                && let Some(sources) = inlet.children().find(|n| n.has_tag_name("Sources")) {
                     for src in sources.children().filter(|n| n.has_tag_name("Source")) {
                         if let Some(uref) = src.attribute("ObjectURef") {
                             track_uid_to_bus_id.insert(uref.to_string(), target_bus_id.clone());
@@ -1003,7 +987,6 @@ fn parse_sequence(
                         }
                     }
                 }
-            }
         }
 
         // Build AudioBus list (only emit when there are submixes or a named main bus)
@@ -1369,8 +1352,7 @@ fn parse_clip(
             .children()
             .find(|n| n.has_tag_name("MasterClip"))
             .and_then(|r| resolve_node(r, by_id, by_uid))
-        {
-            if let Some(cli) = mc_el
+            && let Some(cli) = mc_el
                 .children()
                 .find(|n| n.has_tag_name("LoggingInfo"))
                 .and_then(|r| resolve_node(r, by_id, by_uid))
@@ -1391,13 +1373,11 @@ fn parse_clip(
                 if let Some(mip_ticks) = mip.filter(|&v| v >= 0) {
                     source_tc_frame = source_fps.adobe_ticks_to_frames(mip_ticks);
                 }
-                if let (Some(mip_t), Some(mop_t)) = (mip, mop) {
-                    if mop_t > mip_t {
+                if let (Some(mip_t), Some(mop_t)) = (mip, mop)
+                    && mop_t > mip_t {
                         source_full_duration = source_fps.adobe_ticks_to_frames(mop_t - mip_t);
                     }
-                }
             }
-        }
 
         // SubClip -> Clip
         if let Some(clip_el) = sc_el
@@ -1518,22 +1498,17 @@ fn parse_clip(
             }
 
             // Extract 1-based source audio channel from SecondaryContents/SecondaryContentItem -> ChannelIndex
-            if kind == TrackKind::Audio {
-                if let Some(sec_contents) = clip_el.children().find(|n| n.has_tag_name("SecondaryContents")) {
-                    if let Some(first_item) = sec_contents
+            if kind == TrackKind::Audio
+                && let Some(sec_contents) = clip_el.children().find(|n| n.has_tag_name("SecondaryContents"))
+                    && let Some(first_item) = sec_contents
                         .children()
                         .find(|n| n.has_tag_name("SecondaryContentItem"))
-                    {
-                        if let Some(sec_node) = resolve_node(first_item, by_id, by_uid) {
-                            if let Some(ch_idx) = child_text(sec_node, "ChannelIndex")
+                        && let Some(sec_node) = resolve_node(first_item, by_id, by_uid)
+                            && let Some(ch_idx) = child_text(sec_node, "ChannelIndex")
                                 .and_then(|s| s.trim().parse::<u32>().ok())
                             {
                                 audio_channel = ch_idx + 1;
                             }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1741,18 +1716,17 @@ fn parse_clip(
     }
 
     // Detect Adobe Essential Sound panel processing stored in TrackItem Properties (ESP.*)
-    if kind == TrackKind::Audio {
-        if let Some(props) = ti_inner.and_then(|n| find_descendant(n, "Properties")) {
-            if let Some(mode) = child_text(props, "ESP.AdjustmentsModeID").filter(|s| !s.is_empty()) {
+    if kind == TrackKind::Audio
+        && let Some(props) = ti_inner.and_then(|n| find_descendant(n, "Properties"))
+            && let Some(mode) = child_text(props, "ESP.AdjustmentsModeID").filter(|s| !s.is_empty()) {
                 let mut esp_params = Vec::new();
                 for p in props.children().filter(|n| n.is_element()) {
                     let tag = p.tag_name().name();
-                    if tag.starts_with("ESP.RestorationSection.")
+                    if (tag.starts_with("ESP.RestorationSection.")
                         || tag.starts_with("ESP.ClaritySection.")
                         || tag.starts_with("ESP.Loudness")
-                        || tag.starts_with("ESP.CreativeSection.")
-                    {
-                        if let Some(val) = p.text().map(str::trim).filter(|v| !v.is_empty()) {
+                        || tag.starts_with("ESP.CreativeSection."))
+                        && let Some(val) = p.text().map(str::trim).filter(|v| !v.is_empty()) {
                             esp_params.push(EffectParameter {
                                 id: tag.to_string(),
                                 name: tag.trim_start_matches("ESP.").to_string(),
@@ -1760,7 +1734,6 @@ fn parse_clip(
                                 is_animated: false,
                             });
                         }
-                    }
                 }
                 if !esp_params.is_empty() {
                     let mode_label = match mode.as_str() {
@@ -1783,8 +1756,6 @@ fn parse_clip(
                     });
                 }
             }
-        }
-    }
 
     Clip {
         id: if ti_obj_id.is_empty() {
@@ -2046,8 +2017,8 @@ fn extract_premiere_marker_color(details: &serde_json::Value) -> Option<String> 
     let cue_list = details.get("mCuePointList")?.as_array()?;
     for item in cue_list {
         let raw_val = item.get("mValue").and_then(|v| v.as_str())?;
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_val) {
-            if let Some(argb) = parsed
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_val)
+            && let Some(argb) = parsed
                 .get("color")
                 .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u32 as u64)))
             {
@@ -2085,7 +2056,6 @@ fn extract_premiere_marker_color(details: &serde_json::Value) -> Option<String> 
                 };
                 return Some(color_name.to_string());
             }
-        }
     }
     None
 }

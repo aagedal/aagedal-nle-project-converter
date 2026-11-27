@@ -22,27 +22,40 @@ impl Global for AboutWindowSlot {}
 pub struct AboutWindow {
     focus_handle: FocusHandle,
     copied_info: bool,
-    cross_plugin_count: usize,
+    cross_plugin_count: Option<usize>,
 }
 
 impl AboutWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
-        let cross_plugin_count = InstalledPluginRegistry::system().grouped_plugins(2).len();
+        cx.spawn_in(window, async move |this, cx| {
+            let count = cx
+                .background_executor()
+                .spawn(async move { InstalledPluginRegistry::system().grouped_plugins(2).len() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.cross_plugin_count = Some(count);
+                cx.notify();
+            });
+        })
+        .detach();
         Self {
             focus_handle,
             copied_info: false,
-            cross_plugin_count,
+            cross_plugin_count: None,
         }
     }
 
     fn system_info_summary(&self) -> String {
+        let plugins_label = self
+            .cross_plugin_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "scanning...".to_string());
         format!(
-            "Aagedal NLE Project Converter v{APP_VERSION}\nOS: {} ({})\nStack: Rust + GPUI\nLicense: GPL-3.0-or-later\nDetected Cross-NLE Plugins: {}",
+            "Aagedal NLE Project Converter v{APP_VERSION}\nOS: {} ({})\nStack: Rust + GPUI\nLicense: GPL-3.0-or-later\nDetected Cross-NLE Plugins: {plugins_label}",
             std::env::consts::OS,
             std::env::consts::ARCH,
-            self.cross_plugin_count,
         )
     }
 
@@ -274,10 +287,13 @@ impl Render for AboutWindow {
                                             .text_xs()
                                             .text_color(rgb(theme::MUTED))
                                             .child(format!(
-                                                "{} / {} · {} cross-NLE plugins",
+                                                "{} / {} · {}",
                                                 std::env::consts::OS,
                                                 std::env::consts::ARCH,
-                                                self.cross_plugin_count,
+                                                match self.cross_plugin_count {
+                                                    Some(n) => format!("{n} cross-NLE plugins"),
+                                                    None => "scanning plugins...".to_string(),
+                                                },
                                             )),
                                     ),
                             ),

@@ -61,8 +61,8 @@ pub fn parse_lumetri_component(
         // (hue_deg [0..360), luma [0..1] neutral 0.5, saturation [0..1] neutral 0.0)
         // in order: [Shadows, Midtones, Highlights, (optional) Specular].
         if pid == "47" {
-            if let Some(wheel_b64) = child_text(param, "StartKeyframeValue") {
-                if let Some([sh, mid, hi]) = decode_color_wheels_param47(&wheel_b64) {
+            if let Some(wheel_b64) = child_text(param, "StartKeyframeValue")
+                && let Some([sh, mid, hi]) = decode_color_wheels_param47(&wheel_b64) {
                     if !sh.is_neutral() {
                         data.shadows_wheel = Some(sh);
                     }
@@ -73,7 +73,6 @@ pub fn parse_lumetri_component(
                         data.highlights_wheel = Some(hi);
                     }
                 }
-            }
             continue;
         }
 

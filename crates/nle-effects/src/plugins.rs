@@ -577,14 +577,13 @@ fn build_aliases(
             set.insert(s);
         }
         // Strip leading 3-5 letter vendor acronym (e.g. "AGDL Multi-Layer Anonymizer" -> "multilayeranonymizer")
-        if let Some((first, rest)) = item.trim().split_once(' ') {
-            if first.len() <= 5 && first.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if let Some((first, rest)) = item.trim().split_once(' ')
+            && first.len() <= 5 && first.chars().all(|c| c.is_ascii_alphanumeric()) {
                 let rs = compact_slug(rest);
                 if rs.len() >= 6 {
                     set.insert(rs);
                 }
             }
-        }
     }
     if let Some(bid) = bundle_id {
         let bid_lower = bid.trim().to_ascii_lowercase();
@@ -719,14 +718,11 @@ fn scan_premiere_mediacore_dir(dir: &Path, out: &mut Vec<InstalledPlugin>) {
                     .extension()
                     .and_then(|s| s.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("rsrc"))
-                {
-                    if let Ok(bytes) = fs::read(&rp) {
-                        if let Some(parsed) = parse_pipl_rsrc(&bytes) {
+                    && let Ok(bytes) = fs::read(&rp)
+                        && let Some(parsed) = parse_pipl_rsrc(&bytes) {
                             pipl = Some(parsed);
                             break;
                         }
-                    }
-                }
             }
         }
 

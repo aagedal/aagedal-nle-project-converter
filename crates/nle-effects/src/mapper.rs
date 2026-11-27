@@ -761,11 +761,10 @@ fn extract_target_plugin_id(target_effect_id: &str) -> Option<(&str, &str)> {
         "plugin.audio.vst3",
         "plugin.other",
     ] {
-        if let Some(rest) = target_effect_id.strip_prefix(&format!("{prefix}:")) {
-            if !rest.is_empty() {
+        if let Some(rest) = target_effect_id.strip_prefix(&format!("{prefix}:"))
+            && !rest.is_empty() {
                 return Some((prefix, rest));
             }
-        }
     }
     None
 }

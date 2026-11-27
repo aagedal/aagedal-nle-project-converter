@@ -1,7 +1,7 @@
 use nle_core::{
     flatten_nested_and_multicam_clips, ClipSourceKind, ConversionMessage, ConversionOptions,
     ConversionReport, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
-    SequenceKind, Track, TrackKind,
+    SequenceKind, Severity, Track, TrackKind,
 };
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -66,6 +66,36 @@ pub fn write_otio_file(
         .or_else(|| selected.first().copied())
         .ok_or_else(|| NleError::InvalidFormat("No sequences selected for OTIO export".into()))?;
 
+    let skipped_timelines: Vec<&str> = selected
+        .iter()
+        .filter(|s| s.id != seq.id && s.kind == SequenceKind::Timeline)
+        .map(|s| s.name.as_str())
+        .collect();
+    if !skipped_timelines.is_empty() {
+        let preview = skipped_timelines
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = if skipped_timelines.len() > 3 {
+            format!(" (+{} more)", skipped_timelines.len() - 3)
+        } else {
+            String::new()
+        };
+        messages.push(ConversionMessage {
+            severity: Severity::Warning,
+            code: "OTIO_SINGLE_SEQUENCE".into(),
+            message: format!(
+                "OpenTimelineIO (.otio) stores a single timeline per file: exported '{}'; skipped {} other selected timeline(s): {preview}{extra}.",
+                seq.name,
+                skipped_timelines.len()
+            ),
+            sequence: Some(seq.name.clone()),
+            clip: None,
+        });
+    }
+
     let rate = seq.frame_rate.as_f64();
     let mut tracks_json = Vec::new();
     let mut total_v = 0usize;
@@ -113,11 +143,10 @@ pub fn write_otio_file(
         }
     });
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
     fs::write(output_path, serde_json::to_string_pretty(&timeline)?)?;
 
     Ok(ConversionReport {
@@ -286,4 +315,54 @@ fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, u
         }),
         markers_written,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nle_core::Rational;
+
+    #[test]
+    fn warns_when_multiple_timelines_are_selected() {
+        let dir = std::env::temp_dir().join("aagedal_otio_multi_seq_test");
+        let _ = fs::remove_dir_all(&dir);
+        let out = dir.join("multi.otio");
+
+        let mk_seq = |id: &str, name: &str| Sequence {
+            id: id.into(),
+            name: name.into(),
+            kind: SequenceKind::Timeline,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_25,
+            duration_frames: 0,
+            start_tc_frame: 0,
+            mark_in: None,
+            mark_out: None,
+            video_tracks: Vec::new(),
+            audio_tracks: Vec::new(),
+            audio_buses: Vec::new(),
+            markers: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        let proj = Project {
+            name: "Multi".into(),
+            source_format: NleFormat::PremierePro,
+            sequences: vec![mk_seq("s1", "Edit_Main"), mk_seq("s2", "Edit_Alt")],
+            ..Default::default()
+        };
+
+        let report = write_otio_file(&proj, &out, &ConversionOptions::default()).unwrap();
+        assert_eq!(report.sequences_converted, 1);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.code == "OTIO_SINGLE_SEQUENCE" && m.severity == Severity::Warning),
+            "expected OTIO_SINGLE_SEQUENCE warning, got: {:?}",
+            report.messages
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

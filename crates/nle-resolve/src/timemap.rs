@@ -183,8 +183,8 @@ pub fn decode_media_timemap_full(
     let pb = decode_protobuf(pb_slice).ok()?;
     let mut points: Vec<(f64, f64)> = Vec::new();
     for f in pb {
-        if f.number == 1 {
-            if let ProtoValue::Bytes(bytes) = f.value {
+        if f.number == 1
+            && let ProtoValue::Bytes(bytes) = f.value {
                 let mut x = 0.0_f64;
                 let mut y = 0.0_f64;
                 if let Ok(sub) = decode_protobuf(&bytes) {
@@ -200,7 +200,6 @@ pub fn decode_media_timemap_full(
                 }
                 points.push((x, y));
             }
-        }
     }
     if points.len() < 2 {
         return None;

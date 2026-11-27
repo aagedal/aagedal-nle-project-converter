@@ -64,11 +64,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
         .unwrap_or(fallback_name);
 
     // Decode sequence markers, per-clip markers/colors, and MediaPool clip metadata from project.xml LockableBlobs.
+    type MediaMetadataPair = (BTreeMap<String, String>, BTreeMap<String, String>);
     let mut seq_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
     let mut clip_markers_by_id: HashMap<String, Vec<Marker>> = HashMap::new();
     let mut clip_color_by_id: HashMap<String, u32> = HashMap::new();
-    let mut media_meta_by_info_id: HashMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
-        HashMap::new();
+    let mut media_meta_by_info_id: HashMap<String, MediaMetadataPair> = HashMap::new();
     if let Some(proj_xml) = members.get("project.xml") {
         let sanitized = sanitize_resolve_xml(proj_xml);
         if let Ok(doc) = Document::parse(&sanitized) {
@@ -241,12 +241,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                         if let Some(clip_hex) = child_text(bvi, "Clip") {
                             video_codec = decode_bt_clip_codec(&clip_hex);
                         }
-                        if let Some(geo_hex) = child_text(bvi, "Geometry") {
-                            if let Some((w, h)) = decode_bt_geometry(&geo_hex) {
+                        if let Some(geo_hex) = child_text(bvi, "Geometry")
+                            && let Some((w, h)) = decode_bt_geometry(&geo_hex) {
                                 width = w;
                                 height = h;
                             }
-                        }
                         if let Some(time_hex) = child_text(bvi, "Time") {
                             let (sf, nf, fr) = decode_bt_time(&time_hex);
                             if let Some(s) = sf {
@@ -285,12 +284,11 @@ pub fn read_drp_file(path: &Path) -> NleResult<Project> {
                         .descendants()
                         .filter(|n| n.has_tag_name("BtVideoInfo") || n.has_tag_name("BtAudioInfo"))
                     {
-                        if let Some(info_id) = info_node.attribute("DbId") {
-                            if let Some((sm, cm)) = media_meta_by_info_id.get(info_id) {
+                        if let Some(info_id) = info_node.attribute("DbId")
+                            && let Some((sm, cm)) = media_meta_by_info_id.get(info_id) {
                                 item_std_meta.extend(sm.clone());
                                 item_custom_meta.extend(cm.clone());
                             }
-                        }
                     }
 
                     if !db_id.is_empty() {
@@ -642,8 +640,8 @@ fn parse_resolve_tracks(
 
                 let mut clip_effects = Vec::new();
                 let mut lumetri_effects = Vec::new();
-                if kind == TrackKind::Video {
-                    if let Some(vt) = cnode.children().find(|n| n.has_tag_name("pLmVerTable")) {
+                if kind == TrackKind::Video
+                    && let Some(vt) = cnode.children().find(|n| n.has_tag_name("pLmVerTable")) {
                         let active_id = vt
                             .descendants()
                             .find(|n| n.has_tag_name("pActive"))
@@ -695,7 +693,6 @@ fn parse_resolve_tracks(
                             });
                         }
                     }
-                }
 
                 let clip_flags: u32 = child_text(cnode, "Flags")
                     .and_then(|s| s.trim().parse().ok())
@@ -882,14 +879,13 @@ fn decode_bt_clip_codec(hex: &str) -> Option<String> {
     let raw = decode_wrapper_hex(hex).ok()?;
     let fields = decode_protobuf(&raw).ok()?;
     for f in fields {
-        if f.number == 5 {
-            if let ProtoValue::Bytes(b) = f.value {
+        if f.number == 5
+            && let ProtoValue::Bytes(b) = f.value {
                 let s = String::from_utf8_lossy(&b).trim().to_string();
                 if !s.is_empty() {
                     return Some(s);
                 }
             }
-        }
     }
     None
 }
@@ -974,30 +970,27 @@ fn decode_clip_fields_blob(hex: &str, self_db_id: &str) -> (Option<String>, Opti
     let mut linked_ids: Vec<String> = Vec::new();
 
     for f in outer {
-        if f.number == 1 {
-            if let ProtoValue::Bytes(f1_bytes) = f.value {
-                if let Ok(inner) = decode_protobuf(&f1_bytes) {
+        if f.number == 1
+            && let ProtoValue::Bytes(f1_bytes) = f.value
+                && let Ok(inner) = decode_protobuf(&f1_bytes) {
                     for sf in inner {
                         match (sf.number, sf.value) {
                             (1, ProtoValue::Bytes(f11_bytes)) => {
                                 if let Ok(sub) = decode_protobuf(&f11_bytes) {
                                     for ssf in sub {
-                                        if ssf.number == 1 {
-                                            if let ProtoValue::Bytes(dict_bytes) = ssf.value {
-                                                if let Ok(entries) = decode_keyed_fields(&dict_bytes) {
+                                        if ssf.number == 1
+                                            && let ProtoValue::Bytes(dict_bytes) = ssf.value
+                                                && let Ok(entries) = decode_keyed_fields(&dict_bytes) {
                                                     for (_, kind, val) in entries {
-                                                        if kind == 10 {
-                                                            if let Ok(id) = decode_utf16be(&val) {
+                                                        if kind == 10
+                                                            && let Ok(id) = decode_utf16be(&val) {
                                                                 let id = id.trim().to_string();
                                                                 if !id.is_empty() {
                                                                     linked_ids.push(id);
                                                                 }
                                                             }
-                                                        }
                                                     }
                                                 }
-                                            }
-                                        }
                                     }
                                 }
                             }
@@ -1013,8 +1006,6 @@ fn decode_clip_fields_blob(hex: &str, self_db_id: &str) -> (Option<String>, Opti
                         }
                     }
                 }
-            }
-        }
     }
 
     let link_group_id = if !linked_ids.is_empty() {
@@ -1169,11 +1160,10 @@ fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, BlendMode, RetimeI
 
     if let Some(zx) = zoom_x {
         motion.scale = zx * 100.0;
-        if let Some(zy) = zoom_y {
-            if (zx - zy).abs() > 1e-4 {
+        if let Some(zy) = zoom_y
+            && (zx - zy).abs() > 1e-4 {
                 motion.scale_y = Some(zy * 100.0);
             }
-        }
     }
 
     (motion, opacity, blend_mode, retime_interp)

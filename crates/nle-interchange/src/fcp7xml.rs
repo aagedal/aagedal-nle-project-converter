@@ -1,7 +1,7 @@
 use nle_core::{
     flatten_nested_and_multicam_clips, ClipSourceKind, ConversionMessage, ConversionOptions,
     ConversionReport, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
-    SequenceKind,
+    SequenceKind, Severity,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -65,6 +65,36 @@ pub fn write_fcp7_xml_file(
         .find(|s| s.kind == SequenceKind::Timeline)
         .or_else(|| selected.first().copied())
         .ok_or_else(|| NleError::InvalidFormat("No sequences selected for FCP7 XML export".into()))?;
+
+    let skipped_timelines: Vec<&str> = selected
+        .iter()
+        .filter(|s| s.id != seq.id && s.kind == SequenceKind::Timeline)
+        .map(|s| s.name.as_str())
+        .collect();
+    if !skipped_timelines.is_empty() {
+        let preview = skipped_timelines
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = if skipped_timelines.len() > 3 {
+            format!(" (+{} more)", skipped_timelines.len() - 3)
+        } else {
+            String::new()
+        };
+        messages.push(ConversionMessage {
+            severity: Severity::Warning,
+            code: "FCP7_SINGLE_SEQUENCE".into(),
+            message: format!(
+                "FCP7 XML (.xml) export writes one timeline per file: exported '{}'; skipped {} other selected timeline(s): {preview}{extra}.",
+                seq.name,
+                skipped_timelines.len()
+            ),
+            sequence: Some(seq.name.clone()),
+            clip: None,
+        });
+    }
 
     let tb = seq.frame_rate.timebase();
     let ntsc = if seq.frame_rate.is_ntsc() { "TRUE" } else { "FALSE" };
@@ -175,11 +205,10 @@ pub fn write_fcp7_xml_file(
     }
     xml.push_str("  </sequence>\n</xmeml>\n");
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
     fs::write(output_path, xml)?;
 
     Ok(ConversionReport {
@@ -277,4 +306,54 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nle_core::Rational;
+
+    #[test]
+    fn warns_when_multiple_timelines_are_selected() {
+        let dir = std::env::temp_dir().join("aagedal_fcp7_multi_seq_test");
+        let _ = fs::remove_dir_all(&dir);
+        let out = dir.join("multi.xml");
+
+        let mk_seq = |id: &str, name: &str| Sequence {
+            id: id.into(),
+            name: name.into(),
+            kind: SequenceKind::Timeline,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_25,
+            duration_frames: 0,
+            start_tc_frame: 0,
+            mark_in: None,
+            mark_out: None,
+            video_tracks: Vec::new(),
+            audio_tracks: Vec::new(),
+            audio_buses: Vec::new(),
+            markers: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        let proj = Project {
+            name: "Multi".into(),
+            source_format: NleFormat::DaVinciResolve,
+            sequences: vec![mk_seq("s1", "Reel_1"), mk_seq("s2", "Reel_2")],
+            ..Default::default()
+        };
+
+        let report = write_fcp7_xml_file(&proj, &out, &ConversionOptions::default()).unwrap();
+        assert_eq!(report.sequences_converted, 1);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.code == "FCP7_SINGLE_SEQUENCE" && m.severity == Severity::Warning),
+            "expected FCP7_SINGLE_SEQUENCE warning, got: {:?}",
+            report.messages
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

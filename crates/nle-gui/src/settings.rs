@@ -134,15 +134,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("settings.json");
 
-        let mut s = AppSettings::default();
-        s.default_target_format = NleFormat::PremierePro;
-        s.default_effect_policy = DefaultEffectPolicy::MarkerOnly;
-        s.auto_reveal_output = true;
-        s.show_shortcut_hints = false;
-        s.default_flatten_nested = true;
-        s.default_relink_from = "D:\\Media".to_string();
-        s.default_relink_to = "/Volumes/RAID/Media".to_string();
-        s.last_directory = Some("/tmp".to_string());
+        let s = AppSettings {
+            default_target_format: NleFormat::PremierePro,
+            default_effect_policy: DefaultEffectPolicy::MarkerOnly,
+            auto_reveal_output: true,
+            show_shortcut_hints: false,
+            default_flatten_nested: true,
+            default_relink_from: "D:\\Media".to_string(),
+            default_relink_to: "/Volumes/RAID/Media".to_string(),
+            last_directory: Some("/tmp".to_string()),
+            ..Default::default()
+        };
 
         s.save_to_path(&path).expect("save settings");
         let loaded = AppSettings::load_from_path(&path).expect("load settings");

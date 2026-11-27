@@ -164,11 +164,10 @@ fn decode_marker_entry(entry_bytes: &[u8], scope: MarkerScope) -> Option<Marker>
             (1, ProtoValue::Bytes(key_bytes)) => {
                 if let Ok(kfields) = decode_protobuf(&key_bytes) {
                     for kf in kfields {
-                        if kf.number == 1 {
-                            if let ProtoValue::Varint(v) = kf.value {
+                        if kf.number == 1
+                            && let ProtoValue::Varint(v) = kf.value {
                                 frame = Some((v / 2) as i64);
                             }
-                        }
                     }
                 }
             }
@@ -554,13 +553,11 @@ pub fn decode_media_metadata_blob(
                                 _ => {}
                             }
                         }
-                        if let (Some(id), Some(v)) = (eid, val) {
-                            if !v.is_empty() {
-                                if let Some(name) = resolve_meta_enum_to_name(id) {
+                        if let (Some(id), Some(v)) = (eid, val)
+                            && !v.is_empty()
+                                && let Some(name) = resolve_meta_enum_to_name(id) {
                                     std_meta.insert(name.to_string(), v);
                                 }
-                            }
-                        }
                     }
                 }
                 (4, ProtoValue::Bytes(entry_bytes)) => {
@@ -576,8 +573,8 @@ pub fn decode_media_metadata_blob(
                                 }
                             }
                         }
-                        if let (Some(key), Some(val)) = (k, v) {
-                            if !key.is_empty() {
+                        if let (Some(key), Some(val)) = (k, v)
+                            && !key.is_empty() {
                                 if key == "Column.Intrinsic.TapeName" {
                                     if !val.is_empty() {
                                         std_meta.entry("Tape Name".to_string()).or_insert(val);
@@ -586,7 +583,6 @@ pub fn decode_media_metadata_blob(
                                     custom_meta.insert(key, val);
                                 }
                             }
-                        }
                     }
                 }
                 _ => {}
@@ -815,13 +811,12 @@ fn patch_proto_varints(data: &[u8], updates: &BTreeMap<u32, u64>) -> NleResult<V
         if pos > data.len() {
             return Err(NleError::InvalidFormat("Truncated SetupBA field".into()));
         }
-        if let Some(&new_val) = updates.get(&number) {
-            if wire == 0 && seen.insert(number) {
+        if let Some(&new_val) = updates.get(&number)
+            && wire == 0 && seen.insert(number) {
                 out.extend_from_slice(&data[start..val_start]);
                 write_varint(new_val, &mut out);
                 continue;
             }
-        }
         out.extend_from_slice(&data[start..pos]);
     }
     for (&number, &new_val) in updates {

@@ -26,7 +26,8 @@ Follow-up items and live-NLE test coverage tracked from real-world project testi
   - Added pure-Rust FCPXML 1.8–1.15 / `.fcpxmld` bundle reader (`crates/nle-interchange/src/fcpxml/reader.rs`) and native `.fcpbundle` CoreData SQLite + `NSKeyedArchiver` binary plist reader (`crates/nle-interchange/src/fcpbundle/`), enabling `Final Cut Pro → DaVinci Resolve (.drp)` and `Final Cut Pro → Premiere Pro (.prproj)` / OTIO / FCP7 XML conversion in both CLI and GPUI GUI.
   - Upgraded FCPXML 1.11 writer (`crates/nle-interchange/src/fcpxml/writer.rs`) with per-asset/per-sequence `<format>` resources, accurate `tcStart` & source TC `start`, connected video (`V2+`) and audio lanes with linked-audio deduplication, `<transition>` elements, `<adjust-transform>` / `<adjust-crop>` / `<adjust-blend>`, `<timeMap>` retiming, `<ref-clip>` compound clips, `<mc-clip>` multicam clips, and gap/clip markers.
   - Verified against real Final Cut Pro 11 `.fcpbundle` and `.fcpxmld` (`version="1.15"`) test projects.
-  - Follow-up: live-verify `.prproj → .fcpxml` and `.drp → .fcpxml` import inside Final Cut Pro and expand `.fcpbundle` coverage for compound/multicam clips, transitions, retiming, and markers.
+  - Added `.fcpbundle` support for disabled clips, primary spine `FFAnchoredTransition` transitions, sequence/clip `FFMarker`/`FFChapterMarker`/`FFToDoMarker` markers, and clip retiming (`timeMap`/`rate`).
+  - Follow-up: live-verify `.prproj → .fcpxml` and `.drp → .fcpxml` import inside Final Cut Pro and expand `.fcpbundle` coverage for compound/multicam clips.
 
 ---
 

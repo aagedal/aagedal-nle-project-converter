@@ -94,6 +94,7 @@ pub fn write_fcp7_xml_file(
     let mut id_counter = 1usize;
     let mut total_v = 0usize;
     let mut total_a = 0usize;
+    let mut total_markers = 0usize;
 
     for track in &seq.video_tracks {
         xml.push_str("        <track>\n");
@@ -101,8 +102,16 @@ pub fn write_fcp7_xml_file(
             let ci_id = format!("clipitem-{id_counter}");
             id_counter += 1;
             let file_xml = render_file_ref(&clip.name, &clip.media_path, clip.source_out_frame.max(clip.duration_frames()), tb, ntsc, &mut file_ids, &mut id_counter);
+            let enabled_str = if clip.enabled { "TRUE" } else { "FALSE" };
+            let speed_xml = render_speed_filter(clip);
+            let markers_xml = if options.include_markers {
+                total_markers += clip.markers.len();
+                render_markers(&clip.markers, "            ")
+            } else {
+                String::new()
+            };
             xml.push_str(&format!(
-                "          <clipitem id=\"{ci_id}\"><name>{}</name><duration>{}</duration><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><start>{}</start><end>{}</end><in>{}</in><out>{}</out><enabled>TRUE</enabled>{file_xml}</clipitem>\n",
+                "          <clipitem id=\"{ci_id}\"><name>{}</name><duration>{}</duration><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><start>{}</start><end>{}</end><in>{}</in><out>{}</out><enabled>{enabled_str}</enabled>{file_xml}{speed_xml}{markers_xml}</clipitem>\n",
                 esc(&clip.name),
                 clip.duration_frames().max(1),
                 clip.start_frame,
@@ -111,6 +120,9 @@ pub fn write_fcp7_xml_file(
                 clip.source_out_frame,
             ));
             total_v += 1;
+        }
+        for tr in &track.transitions {
+            xml.push_str(&render_transition_item(tr, tb, ntsc, false));
         }
         xml.push_str(&format!(
             "          <enabled>{}</enabled><locked>{}</locked>\n        </track>\n",
@@ -126,8 +138,16 @@ pub fn write_fcp7_xml_file(
             let ci_id = format!("clipitem-{id_counter}");
             id_counter += 1;
             let file_xml = render_file_ref(&clip.name, &clip.media_path, clip.source_out_frame.max(clip.duration_frames()), tb, ntsc, &mut file_ids, &mut id_counter);
+            let enabled_str = if clip.enabled { "TRUE" } else { "FALSE" };
+            let speed_xml = render_speed_filter(clip);
+            let markers_xml = if options.include_markers {
+                total_markers += clip.markers.len();
+                render_markers(&clip.markers, "            ")
+            } else {
+                String::new()
+            };
             xml.push_str(&format!(
-                "          <clipitem id=\"{ci_id}\"><name>{}</name><duration>{}</duration><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><start>{}</start><end>{}</end><in>{}</in><out>{}</out><enabled>TRUE</enabled>{file_xml}<sourcetrack><mediatype>audio</mediatype><trackindex>{}</trackindex></sourcetrack></clipitem>\n",
+                "          <clipitem id=\"{ci_id}\"><name>{}</name><duration>{}</duration><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><start>{}</start><end>{}</end><in>{}</in><out>{}</out><enabled>{enabled_str}</enabled>{file_xml}<sourcetrack><mediatype>audio</mediatype><trackindex>{}</trackindex></sourcetrack>{speed_xml}{markers_xml}</clipitem>\n",
                 esc(&clip.name),
                 clip.duration_frames().max(1),
                 clip.start_frame,
@@ -138,6 +158,9 @@ pub fn write_fcp7_xml_file(
             ));
             total_a += 1;
         }
+        for tr in &track.transitions {
+            xml.push_str(&render_transition_item(tr, tb, ntsc, true));
+        }
         xml.push_str(&format!(
             "          <enabled>{}</enabled><locked>{}</locked>\n        </track>\n",
             if track.enabled { "TRUE" } else { "FALSE" },
@@ -146,14 +169,9 @@ pub fn write_fcp7_xml_file(
     }
 
     xml.push_str("      </audio>\n    </media>\n");
-    for m in &seq.markers {
-        xml.push_str(&format!(
-            "    <marker><name>{}</name><comment>{}</comment><in>{}</in><out>{}</out></marker>\n",
-            esc(&m.name),
-            esc(&m.comment),
-            m.frame,
-            m.frame + m.duration_frames.max(1)
-        ));
+    if options.include_markers {
+        total_markers += seq.markers.len();
+        xml.push_str(&render_markers(&seq.markers, "    "));
     }
     xml.push_str("  </sequence>\n</xmeml>\n");
 
@@ -173,11 +191,61 @@ pub fn write_fcp7_xml_file(
         audio_clips_converted: total_a,
         media_assets_linked: file_ids.len(),
         bins_created: 0,
-        markers_written: seq.markers.len(),
+        markers_written: total_markers,
         grades_attached: 0,
         effect_markers_injected: 0,
         messages,
     })
+}
+
+fn render_markers(markers: &[nle_core::Marker], indent: &str) -> String {
+    let mut out = String::new();
+    for m in markers {
+        out.push_str(&format!(
+            "{indent}<marker><name>{}</name><comment>{}</comment><in>{}</in><out>{}</out></marker>\n",
+            esc(&m.name),
+            esc(&m.comment),
+            m.frame.max(0),
+            m.frame.max(0) + m.duration_frames.max(1)
+        ));
+    }
+    out
+}
+
+fn render_speed_filter(clip: &nle_core::Clip) -> String {
+    let is_reversed = clip.reversed || clip.speed_percent < 0.0;
+    let abs_speed = clip.speed_percent.abs();
+    if !is_reversed && (abs_speed - 100.0).abs() < 0.05 {
+        return String::new();
+    }
+    let speed_val = if abs_speed < 0.01 { 0.5 } else { abs_speed };
+    let rev_str = if is_reversed { "TRUE" } else { "FALSE" };
+    format!(
+        "<filter><effect><name>Time Remap</name><effectid>timeremap</effectid><effectcategory>motion</effectcategory><effecttype>motion</effecttype><mediatype>video</mediatype><parameter><name>speed</name><parameterid>speed</parameterid><value>{speed_val:.2}</value></parameter><parameter><name>reverse</name><parameterid>reverse</parameterid><value>{rev_str}</value></parameter></effect></filter>"
+    )
+}
+
+fn render_transition_item(tr: &nle_core::Transition, tb: i64, ntsc: &str, is_audio: bool) -> String {
+    let dur = tr.end_frame - tr.start_frame;
+    if dur <= 0 {
+        return String::new();
+    }
+    let align = match tr.alignment.as_str() {
+        "start" => "start",
+        "end" => "end",
+        _ => "center",
+    };
+    let (eff_name, eff_id, eff_cat, media_type) = if is_audio {
+        ("Cross Fade (+3dB)", "KGAudioTransCrossFade3dB", "Audio Transitions", "audio")
+    } else {
+        ("Cross Dissolve", "Cross Dissolve", "Dissolve", "video")
+    };
+    format!(
+        "          <transitionitem><start>{}</start><end>{}</end><alignment>{align}</alignment><rate><timebase>{tb}</timebase><ntsc>{ntsc}</ntsc></rate><effect><name>{}</name><effectid>{eff_id}</effectid><effectcategory>{eff_cat}</effectcategory><effecttype>transition</effecttype><mediatype>{media_type}</mediatype></effect></transitionitem>\n",
+        tr.start_frame.max(0),
+        tr.end_frame.max(tr.start_frame + 1),
+        esc(if tr.name.is_empty() { eff_name } else { &tr.name }),
+    )
 }
 
 fn render_file_ref(

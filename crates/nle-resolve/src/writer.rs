@@ -9,7 +9,7 @@ use crate::binary::{
 };
 use crate::grade::{build_grade_and_stabilization_body, build_version_table_xml};
 use crate::state::{
-    append_lockable_blob, build_sequence_setup_blob, clip_color_lockable_blob_xml,
+    append_lockable_blob, build_sequence_setup_blob, clip_item_lockable_blob_xml,
     configure_project_color_blob, media_metadata_lockable_blob_xml, patch_project_setup_defaults,
     premiere_label_to_resolve_color, sequence_lockable_blob_xml,
 };
@@ -18,9 +18,9 @@ use crate::timemap::{
     STILL_SOURCE_IN,
 };
 use nle_core::{
-    flatten_nested_and_multicam_clips, Clip, ClipSourceKind, ConversionMessage, ConversionOptions,
-    ConversionReport, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project,
-    ProjectWriter, RetimeInterpolation, Sequence, SequenceKind, Severity,
+    flatten_nested_and_multicam_clips, BlendMode, Clip, ClipSourceKind, ConversionMessage,
+    ConversionOptions, ConversionReport, MediaKind, MotionTransform, NleError, NleFormat,
+    NleResult, Project, ProjectWriter, RetimeInterpolation, Sequence, SequenceKind, Severity,
 };
 use regex::Regex;
 use std::borrow::Cow;
@@ -443,10 +443,11 @@ pub fn write_drp_file(
                     node = set_child_text(&node, "FieldsBlob", &fb_hex);
                 }
 
-                // Motion static transform + Opacity + Retime Interpolation
+                // Motion static transform + Crop + Opacity & Blend Mode + Retime Interpolation
                 let motion_hex = build_static_video_effects_payload(
                     &clip.motion,
                     clip.opacity,
+                    clip.blend_mode,
                     clip.retime_interpolation,
                     (clip.source_width, clip.source_height),
                     (seq.width, seq.height),
@@ -489,13 +490,31 @@ pub fn write_drp_file(
                     }
                 }
 
-                // Clip color label
-                if options.include_clip_colors {
-                    if let Some(preset) = clip.label_preset_index {
-                        if let Some(resolve_color) = premiere_label_to_resolve_color(preset) {
-                            lockable_blobs.push(clip_color_lockable_blob_xml(&clip_db_id, resolve_color));
-                        }
-                    }
+                // Clip disabled flag (bit 1 = 2)
+                if !clip.enabled {
+                    let base_flags: u32 = extract_tag_inner(&node, "Flags")
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    node = set_child_text(&node, "Flags", &(base_flags | 2).to_string());
+                }
+
+                // Clip color label + per-clip markers (Sm2TiItemLockableBlob)
+                let resolve_color = if options.include_clip_colors {
+                    clip.label_preset_index
+                        .and_then(premiere_label_to_resolve_color)
+                } else {
+                    None
+                };
+                let clip_markers: &[nle_core::Marker] = if options.include_markers {
+                    &clip.markers
+                } else {
+                    &[]
+                };
+                if let Some(blob) =
+                    clip_item_lockable_blob_xml(&clip_db_id, clip_markers, resolve_color)
+                {
+                    lockable_blobs.push(blob);
+                    total_markers += clip_markers.len();
                 }
 
                 timed_items.push((abs_start, 0, format!("<Element>{node}</Element>")));
@@ -634,12 +653,29 @@ pub fn write_drp_file(
                     node = set_child_text(&node, "FieldsBlob", &fb_hex);
                 }
 
-                if options.include_clip_colors {
-                    if let Some(preset) = clip.label_preset_index {
-                        if let Some(resolve_color) = premiere_label_to_resolve_color(preset) {
-                            lockable_blobs.push(clip_color_lockable_blob_xml(&clip_db_id, resolve_color));
-                        }
-                    }
+                if !clip.enabled {
+                    let base_flags: u32 = extract_tag_inner(&node, "Flags")
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    node = set_child_text(&node, "Flags", &(base_flags | 2).to_string());
+                }
+
+                let resolve_color = if options.include_clip_colors {
+                    clip.label_preset_index
+                        .and_then(premiere_label_to_resolve_color)
+                } else {
+                    None
+                };
+                let clip_markers: &[nle_core::Marker] = if options.include_markers {
+                    &clip.markers
+                } else {
+                    &[]
+                };
+                if let Some(blob) =
+                    clip_item_lockable_blob_xml(&clip_db_id, clip_markers, resolve_color)
+                {
+                    lockable_blobs.push(blob);
+                    total_markers += clip_markers.len();
                 }
 
                 timed_items.push((abs_start, 0, format!("<Element>{node}</Element>")));
@@ -1699,20 +1735,32 @@ fn build_clip_fields_blob(sibling_ids: &[String], active_angle: Option<&str>) ->
 fn build_static_video_effects_payload(
     motion: &MotionTransform,
     opacity: f64,
+    blend_mode: BlendMode,
     retime_interpolation: RetimeInterpolation,
     source_geom: (u32, u32),
     timeline_geom: (u32, u32),
 ) -> Option<String> {
-    let has_motion = !motion.is_identity();
+    let has_transform = (motion.scale - 100.0).abs() > 1e-6
+        || motion.scale_y.is_some()
+        || motion.position_x.abs() > 1e-6
+        || motion.position_y.abs() > 1e-6
+        || motion.rotation.abs() > 1e-6
+        || motion.anchor_x.abs() > 1e-6
+        || motion.anchor_y.abs() > 1e-6;
+    let has_crop = motion.crop_left.abs() > 1e-6
+        || motion.crop_right.abs() > 1e-6
+        || motion.crop_top.abs() > 1e-6
+        || motion.crop_bottom.abs() > 1e-6;
     let has_opacity = opacity.is_finite() && (opacity - 100.0).abs() > 1e-3;
+    let has_blend = !blend_mode.is_normal();
     let has_retime_interp = retime_interpolation != RetimeInterpolation::Default;
-    if !has_motion && !has_opacity && !has_retime_interp {
+    if !has_transform && !has_crop && !has_opacity && !has_blend && !has_retime_interp {
         return None;
     }
 
     let mut outer_fields: Vec<ProtoField> = Vec::new();
 
-    if has_motion {
+    if has_transform {
         let (sw, sh) = source_geom;
         let (tw, th) = timeline_geom;
         let fit = if sw > 0 && sh > 0 && tw > 0 && th > 0 {
@@ -1748,15 +1796,51 @@ fn build_static_video_effects_payload(
         outer_fields.push(ProtoField::bytes(1, encode_protobuf(&fields)));
     }
 
-    if has_opacity {
-        // Resolve Filter 2 (Composite): slot 0 = CompositeMode (empty/default), slot 1 = param 1 Opacity (f64le)
-        let kf = encode_protobuf(&[ProtoField::f64_le(2, opacity.clamp(0.0, 100.0))]);
-        let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
-        let param = encode_protobuf(&[ProtoField::varint(1, 1), ProtoField::bytes(3, curve)]);
+    if has_crop {
+        // Resolve Filter 6 (Cropping): params 54=CropLeft, 55=CropRight, 56=CropTop, 57=CropBottom (normalized 0.0..=1.0)
+        let crop_specs: [(u64, f64); 4] = [
+            (54, (motion.crop_left / 100.0).clamp(0.0, 1.0)),
+            (55, (motion.crop_right / 100.0).clamp(0.0, 1.0)),
+            (56, (motion.crop_top / 100.0).clamp(0.0, 1.0)),
+            (57, (motion.crop_bottom / 100.0).clamp(0.0, 1.0)),
+        ];
+        let mut crop_fields = vec![ProtoField::varint(1, 6)];
+        for (pid, val) in crop_specs {
+            if val.abs() > 1e-6 {
+                let kf = encode_protobuf(&[ProtoField::f64_le(2, val)]);
+                let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+                let param =
+                    encode_protobuf(&[ProtoField::varint(1, pid), ProtoField::bytes(3, curve)]);
+                crop_fields.push(ProtoField::bytes(9, param));
+            } else {
+                crop_fields.push(ProtoField::bytes(9, Vec::new()));
+            }
+        }
+        outer_fields.push(ProtoField::bytes(1, encode_protobuf(&crop_fields)));
+    }
+
+    if has_opacity || has_blend {
+        // Resolve Filter 2 (Composite):
+        // - slot 0: param 0 CompositeMode (varint enum, or empty for Normal)
+        // - slot 1: param 1 Opacity (f64le 0..=100, or empty for 100%)
+        let slot0 = if has_blend {
+            let kf = encode_protobuf(&[ProtoField::varint(4, blend_mode.to_resolve_code())]);
+            let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+            encode_protobuf(&[ProtoField::varint(1, 0), ProtoField::bytes(3, curve)])
+        } else {
+            Vec::new()
+        };
+        let slot1 = if has_opacity {
+            let kf = encode_protobuf(&[ProtoField::f64_le(2, opacity.clamp(0.0, 100.0))]);
+            let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+            encode_protobuf(&[ProtoField::varint(1, 1), ProtoField::bytes(3, curve)])
+        } else {
+            Vec::new()
+        };
         let comp_fields = vec![
             ProtoField::varint(1, 2),
-            ProtoField::bytes(9, Vec::new()),
-            ProtoField::bytes(9, param),
+            ProtoField::bytes(9, slot0),
+            ProtoField::bytes(9, slot1),
         ];
         outer_fields.push(ProtoField::bytes(1, encode_protobuf(&comp_fields)));
     }
@@ -1795,31 +1879,73 @@ fn build_resolve_transition_xml(
     let nm_lower = tr.name.to_ascii_lowercase();
 
     let pretty_type = if is_audio {
-        if id_lower.contains("constant power") || nm_lower.contains("constant power") {
-            "Cross Fade +3DB"
+        if id_lower.contains("exponential")
+            || nm_lower.contains("exponential")
+            || id_lower.contains("-3db")
+            || nm_lower.contains("-3db")
+            || id_lower.contains("-3 db")
+            || nm_lower.contains("-3 db")
+        {
+            "Cross Fade -3DB"
         } else if id_lower.contains("constant gain")
             || nm_lower.contains("constant gain")
-            || id_lower.contains("exponential")
-            || nm_lower.contains("exponential")
+            || id_lower.contains("0db")
+            || nm_lower.contains("0db")
+            || id_lower.contains("0 db")
+            || nm_lower.contains("0 db")
             || id_lower.contains("custom fade")
             || nm_lower.contains("custom fade")
-            || id_lower.contains("cross fade")
-            || nm_lower.contains("cross fade")
         {
             "Cross Fade 0DB"
+        } else if id_lower.contains("constant power")
+            || nm_lower.contains("constant power")
+            || id_lower.contains("+3db")
+            || nm_lower.contains("+3db")
+            || id_lower.contains("+3 db")
+            || nm_lower.contains("+3 db")
+            || id_lower.contains("cross fade")
+            || nm_lower.contains("cross fade")
+            || id_lower.contains("fade")
+            || nm_lower.contains("fade")
+        {
+            "Cross Fade +3DB"
         } else {
             return None;
         }
+    } else if id_lower.contains("dip to black")
+        || nm_lower.contains("dip to black")
+        || id_lower.contains("dip to white")
+        || nm_lower.contains("dip to white")
+        || id_lower.contains("dip to color")
+        || nm_lower.contains("dip to color")
+        || id_lower.contains("fade to color")
+        || nm_lower.contains("fade to color")
+    {
+        "Dip To Color Dissolve"
+    } else if id_lower.contains("non-additive")
+        || nm_lower.contains("non-additive")
+        || id_lower.contains("non additive")
+        || nm_lower.contains("non additive")
+    {
+        "Non-Additive Dissolve"
+    } else if id_lower.contains("additive dissolve") || nm_lower.contains("additive dissolve") {
+        "Additive Dissolve"
+    } else if id_lower.contains("smooth cut")
+        || nm_lower.contains("smooth cut")
+        || id_lower.contains("morph cut")
+        || nm_lower.contains("morph cut")
+        || id_lower.contains("flow")
+        || nm_lower.contains("flow")
+    {
+        "Smooth Cut"
     } else if id_lower.contains("cross dissolve")
         || nm_lower.contains("cross dissolve")
         || id_lower.contains("film dissolve")
         || nm_lower.contains("film dissolve")
-        || id_lower.contains("additive dissolve")
-        || nm_lower.contains("additive dissolve")
-        || id_lower.contains("dip to black")
-        || nm_lower.contains("dip to black")
-        || id_lower.contains("dip to white")
-        || nm_lower.contains("dip to white")
+        || id_lower.contains("dissolve")
+        || nm_lower.contains("dissolve")
+        || id_lower.contains("fade")
+        || nm_lower.contains("fade")
     {
         "Cross Dissolve"
     } else {

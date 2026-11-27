@@ -9,10 +9,10 @@ use crate::state::{
 };
 use crate::timemap::decode_media_timemap_full;
 use nle_core::{
-    frames_to_timecode, AlphaMode, Clip, ClipSourceKind, ColorConfig, DataLevels, EffectCategory,
-    EffectInstance, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError,
-    NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, RetimeInterpolation,
-    Sequence, SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, AlphaMode, BlendMode, Clip, ClipSourceKind, ColorConfig, DataLevels,
+    EffectCategory, EffectInstance, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -582,11 +582,16 @@ fn parse_resolve_tracks(
                     .map(|h| decode_clip_fields_blob(&h, &clip_db_id))
                     .unwrap_or((None, None));
 
-                let (mut motion, opacity, retime_interpolation) =
+                let (mut motion, opacity, blend_mode, retime_interpolation) =
                     child_text(cnode, "EffectFiltersBA")
                         .map(|h| decode_effect_filters(&h))
                         .unwrap_or_else(|| {
-                            (MotionTransform::default(), 100.0, RetimeInterpolation::Default)
+                            (
+                                MotionTransform::default(),
+                                100.0,
+                                BlendMode::Normal,
+                                RetimeInterpolation::Default,
+                            )
                         });
 
                 // Backfill MediaAsset full path when Resolve 21.2 zstd-compressed BtVideoInfo/Clip
@@ -692,6 +697,11 @@ fn parse_resolve_tracks(
                     }
                 }
 
+                let clip_flags: u32 = child_text(cnode, "Flags")
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                let clip_enabled = (clip_flags & 2) == 0;
+
                 clips.push(Clip {
                     id: clip_db_id,
                     name: cname,
@@ -717,13 +727,14 @@ fn parse_resolve_tracks(
                     reversed,
                     speed_keyframes,
                     retime_interpolation,
-                    enabled: true,
+                    enabled: clip_enabled,
                     audio_channel,
                     link_group_id,
                     label_name,
                     label_preset_index,
                     motion,
                     opacity,
+                    blend_mode,
                     lumetri_effects,
                     effects: clip_effects,
                     markers: clip_markers,
@@ -1020,17 +1031,18 @@ fn decode_clip_fields_blob(hex: &str, self_db_id: &str) -> (Option<String>, Opti
     (active_angle, link_group_id)
 }
 
-/// Decode Resolve `<EffectFiltersBA>` (`0x80` or `0x81` zstd) into `(MotionTransform, opacity, RetimeInterpolation)`.
-fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, RetimeInterpolation) {
+/// Decode Resolve `<EffectFiltersBA>` (`0x80` or `0x81` zstd) into `(MotionTransform, opacity, BlendMode, RetimeInterpolation)`.
+fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, BlendMode, RetimeInterpolation) {
     let mut motion = MotionTransform::default();
     let mut opacity = 100.0_f64;
+    let mut blend_mode = BlendMode::Normal;
     let mut retime_interp = RetimeInterpolation::Default;
 
     let Ok(raw) = decode_wrapper_hex(hex) else {
-        return (motion, opacity, retime_interp);
+        return (motion, opacity, blend_mode, retime_interp);
     };
     let Ok(outer) = decode_protobuf(&raw) else {
-        return (motion, opacity, retime_interp);
+        return (motion, opacity, blend_mode, retime_interp);
     };
 
     let mut zoom_x: Option<f64> = None;
@@ -1089,8 +1101,10 @@ fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, RetimeInterpolatio
                 motion.has_keyframes = true;
             }
 
-            // Handle enum-valued parameters (e.g. Filter 44 RetimeProcess param 91)
-            if filter_id == 44 && pid == 91 {
+            // Handle enum-valued parameters:
+            // - Filter 2 param 0: CompositeMode (Blend Mode)
+            // - Filter 44 param 91: RetimeProcess
+            if (filter_id == 2 && pid == 0) || (filter_id == 44 && pid == 91) {
                 let first_enum = curve_fields.iter().find_map(|cf| {
                     if cf.number != 1 {
                         return None;
@@ -1105,12 +1119,18 @@ fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, RetimeInterpolatio
                     })
                 });
                 if let Some(ev) = first_enum {
-                    retime_interp = match ev {
-                        1 => RetimeInterpolation::FrameSampling,
-                        2 => RetimeInterpolation::FrameBlending,
-                        3 => RetimeInterpolation::OpticalFlow,
-                        _ => RetimeInterpolation::Default,
-                    };
+                    if filter_id == 2 && pid == 0 {
+                        if let Some(bm) = BlendMode::from_resolve_code(ev) {
+                            blend_mode = bm;
+                        }
+                    } else {
+                        retime_interp = match ev {
+                            1 => RetimeInterpolation::FrameSampling,
+                            2 => RetimeInterpolation::FrameBlending,
+                            3 => RetimeInterpolation::OpticalFlow,
+                            _ => RetimeInterpolation::Default,
+                        };
+                    }
                 }
                 continue;
             }
@@ -1156,5 +1176,5 @@ fn decode_effect_filters(hex: &str) -> (MotionTransform, f64, RetimeInterpolatio
         }
     }
 
-    (motion, opacity, retime_interp)
+    (motion, opacity, blend_mode, retime_interp)
 }

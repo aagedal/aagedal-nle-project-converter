@@ -134,6 +134,336 @@ pub enum DataLevels {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Darken,
+    Multiply,
+    ColorBurn,
+    LinearBurn,
+    DarkerColor,
+    Lighten,
+    Screen,
+    ColorDodge,
+    LinearDodgeAdd,
+    LighterColor,
+    Overlay,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Difference,
+    Exclusion,
+    Subtract,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl BlendMode {
+    pub fn is_normal(self) -> bool {
+        self == Self::Normal
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Darken => "Darken",
+            Self::Multiply => "Multiply",
+            Self::ColorBurn => "Color Burn",
+            Self::LinearBurn => "Linear Burn",
+            Self::DarkerColor => "Darker Color",
+            Self::Lighten => "Lighten",
+            Self::Screen => "Screen",
+            Self::ColorDodge => "Color Dodge",
+            Self::LinearDodgeAdd => "Add",
+            Self::LighterColor => "Lighter Color",
+            Self::Overlay => "Overlay",
+            Self::SoftLight => "Soft Light",
+            Self::HardLight => "Hard Light",
+            Self::VividLight => "Vivid Light",
+            Self::LinearLight => "Linear Light",
+            Self::PinLight => "Pin Light",
+            Self::HardMix => "Hard Mix",
+            Self::Difference => "Difference",
+            Self::Exclusion => "Exclusion",
+            Self::Subtract => "Subtract",
+            Self::Divide => "Divide",
+            Self::Hue => "Hue",
+            Self::Saturation => "Saturation",
+            Self::Color => "Color",
+            Self::Luminosity => "Luminosity",
+        }
+    }
+
+    /// Parse FCPXML `<adjust-blend mode="...">` (e.g. `"14 (Overlay)"`, `"Screen"`, `"Add"`)
+    /// or any human-readable blend mode name.
+    pub fn parse_name(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // Extract parenthesized label if present, e.g. "14 (Overlay)" -> "Overlay"
+        let inner = if let (Some(l), Some(r)) = (trimmed.find('('), trimmed.rfind(')')) {
+            if r > l + 1 {
+                &trimmed[l + 1..r]
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        };
+        let norm: String = inner
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match norm.as_str() {
+            "normal" => Some(Self::Normal),
+            "darken" => Some(Self::Darken),
+            "multiply" => Some(Self::Multiply),
+            "colorburn" => Some(Self::ColorBurn),
+            "linearburn" => Some(Self::LinearBurn),
+            "darkercolor" => Some(Self::DarkerColor),
+            "lighten" => Some(Self::Lighten),
+            "screen" => Some(Self::Screen),
+            "colordodge" => Some(Self::ColorDodge),
+            "add" | "lineardodge" | "lineardodgeadd" => Some(Self::LinearDodgeAdd),
+            "lightercolor" => Some(Self::LighterColor),
+            "overlay" => Some(Self::Overlay),
+            "softlight" => Some(Self::SoftLight),
+            "hardlight" => Some(Self::HardLight),
+            "vividlight" => Some(Self::VividLight),
+            "linearlight" => Some(Self::LinearLight),
+            "pinlight" => Some(Self::PinLight),
+            "hardmix" => Some(Self::HardMix),
+            "difference" => Some(Self::Difference),
+            "exclusion" => Some(Self::Exclusion),
+            "subtract" => Some(Self::Subtract),
+            "divide" => Some(Self::Divide),
+            "hue" => Some(Self::Hue),
+            "saturation" | "saturate" => Some(Self::Saturation),
+            "color" | "colorize" => Some(Self::Color),
+            "luminosity" | "luminance" => Some(Self::Luminosity),
+            _ => {
+                // Fallback: leading numeric FCP OZML blend code (e.g. "14" or "14 (Overlay)")
+                trimmed
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<i64>().ok())
+                    .and_then(Self::from_fcp_code)
+            }
+        }
+    }
+
+    /// Decode Final Cut Pro OZML / Motion numeric blend mode code.
+    pub fn from_fcp_code(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Normal),
+            2 => Some(Self::Subtract),
+            3 => Some(Self::Multiply),
+            4 => Some(Self::Screen),
+            5 => Some(Self::Darken),
+            6 => Some(Self::Lighten),
+            7 => Some(Self::LinearDodgeAdd),
+            14 => Some(Self::Overlay),
+            15 => Some(Self::SoftLight),
+            16 => Some(Self::HardLight),
+            17 => Some(Self::ColorDodge),
+            18 => Some(Self::ColorBurn),
+            21 => Some(Self::Difference),
+            22 => Some(Self::Exclusion),
+            23 => Some(Self::Hue),
+            24 => Some(Self::Saturation),
+            25 => Some(Self::Color),
+            26 => Some(Self::Luminosity),
+            27 => Some(Self::VividLight),
+            28 => Some(Self::LinearLight),
+            29 => Some(Self::PinLight),
+            30 => Some(Self::HardMix),
+            31 => Some(Self::LinearBurn),
+            32 => Some(Self::DarkerColor),
+            33 => Some(Self::LighterColor),
+            34 => Some(Self::Divide),
+            _ => None,
+        }
+    }
+
+    /// FCPXML `<adjust-blend mode="...">` string value.
+    pub fn to_fcpxml_mode(self) -> &'static str {
+        self.display_name()
+    }
+
+    /// Decode DaVinci Resolve `EffectFiltersBA` Filter 2 Param 0 (`CompositeMode`) enum.
+    pub fn from_resolve_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Normal),
+            1 | 19 => Some(Self::LinearDodgeAdd),
+            2 => Some(Self::Subtract),
+            3 => Some(Self::Difference),
+            4 => Some(Self::Multiply),
+            5 => Some(Self::Screen),
+            6 => Some(Self::Overlay),
+            7 => Some(Self::HardLight),
+            8 => Some(Self::SoftLight),
+            9 => Some(Self::Darken),
+            10 => Some(Self::Lighten),
+            11 => Some(Self::ColorDodge),
+            12 => Some(Self::ColorBurn),
+            13 => Some(Self::Exclusion),
+            14 => Some(Self::Hue),
+            15 => Some(Self::Saturation),
+            16 => Some(Self::Color),
+            17 => Some(Self::Luminosity),
+            18 => Some(Self::Divide),
+            20 => Some(Self::LinearBurn),
+            21 => Some(Self::LinearLight),
+            22 => Some(Self::VividLight),
+            23 => Some(Self::PinLight),
+            24 => Some(Self::HardMix),
+            25 => Some(Self::LighterColor),
+            26 => Some(Self::DarkerColor),
+            _ => None,
+        }
+    }
+
+    /// Encode to DaVinci Resolve `EffectFiltersBA` Filter 2 Param 0 (`CompositeMode`) enum.
+    pub fn to_resolve_code(self) -> u64 {
+        match self {
+            Self::Normal => 0,
+            Self::LinearDodgeAdd => 1,
+            Self::Subtract => 2,
+            Self::Difference => 3,
+            Self::Multiply => 4,
+            Self::Screen => 5,
+            Self::Overlay => 6,
+            Self::HardLight => 7,
+            Self::SoftLight => 8,
+            Self::Darken => 9,
+            Self::Lighten => 10,
+            Self::ColorDodge => 11,
+            Self::ColorBurn => 12,
+            Self::Exclusion => 13,
+            Self::Hue => 14,
+            Self::Saturation => 15,
+            Self::Color => 16,
+            Self::Luminosity => 17,
+            Self::Divide => 18,
+            Self::LinearBurn => 20,
+            Self::LinearLight => 21,
+            Self::VividLight => 22,
+            Self::PinLight => 23,
+            Self::HardMix => 24,
+            Self::LighterColor => 25,
+            Self::DarkerColor => 26,
+        }
+    }
+
+    /// Decode Premiere Pro `AE.ADBE Opacity` `ParameterID=3` (UI Blend Mode enum).
+    pub fn from_premiere_param3(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Normal),
+            2 => Some(Self::Darken),
+            3 => Some(Self::Multiply),
+            4 => Some(Self::ColorBurn),
+            5 => Some(Self::LinearBurn),
+            6 => Some(Self::DarkerColor),
+            7 => Some(Self::Lighten),
+            8 => Some(Self::Screen),
+            9 => Some(Self::ColorDodge),
+            10 => Some(Self::LinearDodgeAdd),
+            11 => Some(Self::LighterColor),
+            12 => Some(Self::Overlay),
+            13 => Some(Self::SoftLight),
+            14 => Some(Self::HardLight),
+            15 => Some(Self::VividLight),
+            16 => Some(Self::LinearLight),
+            17 => Some(Self::PinLight),
+            18 => Some(Self::HardMix),
+            19 => Some(Self::Difference),
+            20 => Some(Self::Exclusion),
+            21 => Some(Self::Subtract),
+            22 => Some(Self::Divide),
+            23 => Some(Self::Hue),
+            24 => Some(Self::Saturation),
+            25 => Some(Self::Color),
+            26 => Some(Self::Luminosity),
+            _ => None,
+        }
+    }
+
+    /// Decode Premiere Pro `AE.ADBE Opacity` `ParameterID=2` (legacy internal alphabetical enum).
+    pub fn from_premiere_param2(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Color),
+            1 => Some(Self::ColorBurn),
+            2 => Some(Self::ColorDodge),
+            3 => Some(Self::Darken),
+            4 => Some(Self::DarkerColor),
+            5 => Some(Self::Difference),
+            7 => Some(Self::Exclusion),
+            8 => Some(Self::HardLight),
+            9 => Some(Self::HardMix),
+            10 => Some(Self::Hue),
+            11 => Some(Self::Lighten),
+            12 => Some(Self::LighterColor),
+            13 => Some(Self::LinearBurn),
+            14 => Some(Self::LinearDodgeAdd),
+            15 => Some(Self::LinearLight),
+            16 => Some(Self::Luminosity),
+            17 => Some(Self::Multiply),
+            18 => Some(Self::Normal),
+            19 => Some(Self::Overlay),
+            20 => Some(Self::PinLight),
+            21 => Some(Self::Saturation),
+            22 => Some(Self::Screen),
+            23 => Some(Self::SoftLight),
+            24 => Some(Self::VividLight),
+            25 => Some(Self::Subtract),
+            26 => Some(Self::Divide),
+            _ => None,
+        }
+    }
+
+    /// Encode to Premiere Pro `AE.ADBE Opacity` `(ParameterID=2, ParameterID=3)` enum pair.
+    pub fn to_premiere_params(self) -> (i64, i64) {
+        match self {
+            Self::Normal => (18, 0),
+            Self::Darken => (3, 2),
+            Self::Multiply => (17, 3),
+            Self::ColorBurn => (1, 4),
+            Self::LinearBurn => (13, 5),
+            Self::DarkerColor => (4, 6),
+            Self::Lighten => (11, 7),
+            Self::Screen => (22, 8),
+            Self::ColorDodge => (2, 9),
+            Self::LinearDodgeAdd => (14, 10),
+            Self::LighterColor => (12, 11),
+            Self::Overlay => (19, 12),
+            Self::SoftLight => (23, 13),
+            Self::HardLight => (8, 14),
+            Self::VividLight => (24, 15),
+            Self::LinearLight => (15, 16),
+            Self::PinLight => (20, 17),
+            Self::HardMix => (9, 18),
+            Self::Difference => (5, 19),
+            Self::Exclusion => (7, 20),
+            Self::Subtract => (25, 21),
+            Self::Divide => (26, 22),
+            Self::Hue => (10, 23),
+            Self::Saturation => (21, 24),
+            Self::Color => (0, 25),
+            Self::Luminosity => (16, 26),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RetimeInterpolation {
     #[default]
     Default,
@@ -371,6 +701,8 @@ pub struct Clip {
     pub label_preset_index: Option<u8>,
     pub motion: MotionTransform,
     pub opacity: f64,
+    #[serde(default)]
+    pub blend_mode: BlendMode,
     pub lumetri_effects: Vec<LumetriData>,
     pub effects: Vec<EffectInstance>,
     pub markers: Vec<Marker>,

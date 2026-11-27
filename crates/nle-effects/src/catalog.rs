@@ -231,10 +231,10 @@ pub fn builtin_effect_catalog() -> Vec<EffectRule> {
             id: "pr_opacity".into(),
             source_nle: NleFormat::PremierePro,
             match_patterns: vec!["adbe opacity".into()],
-            source_display_name: "Opacity & Blend Mode".into(),
+            source_display_name: "Opacity & Blend Mode (Animated / Masked)".into(),
             category: EffectCategory::Transform,
             fidelity: MappingFidelity::AskUserSuggested,
-            notes: "Non-100% opacity, blend modes, or opacity masks.".into(),
+            notes: "Static opacity and blend modes translate natively across Premiere, Resolve, and Final Cut Pro; animated opacity keyframes or masks are flagged for review.".into(),
             targets: vec![
                 TargetEffectOption {
                     id: "resolve.inspector.composite".into(),

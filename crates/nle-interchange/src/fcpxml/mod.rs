@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(v2.start_frame, 325);
         assert_eq!(v2.end_frame, 595);
         assert_eq!(v2.source_in_frame, 144); // 2.88s @ 50fps
-        assert!(v2.effects.iter().any(|e| e.match_name == "fcp.compositing"));
+        assert_eq!(v2.blend_mode, BlendMode::Overlay);
 
         // Connected Basic Title on lane 2 captured as Cyan marker at frame 160 (dur 251)
         assert_eq!(seq.markers.len(), 1);
@@ -507,6 +507,7 @@ mod tests {
             label_preset_index: None,
             motion: MotionTransform::default(),
             opacity: 100.0,
+            blend_mode: BlendMode::Normal,
             lumetri_effects: vec![],
             effects: vec![],
             markers: vec![],

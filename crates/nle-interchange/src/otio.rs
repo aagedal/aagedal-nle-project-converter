@@ -70,9 +70,13 @@ pub fn write_otio_file(
     let mut tracks_json = Vec::new();
     let mut total_v = 0usize;
     let mut total_a = 0usize;
+    let mut total_markers = 0usize;
 
     for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
-        tracks_json.push(serialize_track(track, rate));
+        let (track_val, clip_markers_written) =
+            serialize_track(track, rate, options.include_markers);
+        tracks_json.push(track_val);
+        total_markers += clip_markers_written;
         if track.kind == TrackKind::Video {
             total_v += track.clips.len();
         } else {
@@ -80,23 +84,15 @@ pub fn write_otio_file(
         }
     }
 
-    let markers_json: Vec<Value> = seq
-        .markers
-        .iter()
-        .map(|m| {
-            json!({
-                "OTIO_SCHEMA": "Marker.2",
-                "name": m.name,
-                "color": m.color.to_ascii_uppercase(),
-                "comment": m.comment,
-                "marked_range": {
-                    "OTIO_SCHEMA": "TimeRange.1",
-                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": m.frame as f64 },
-                    "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": m.duration_frames.max(1) as f64 }
-                }
-            })
-        })
-        .collect();
+    let markers_json: Vec<Value> = if options.include_markers {
+        total_markers += seq.markers.len();
+        seq.markers
+            .iter()
+            .map(|m| serialize_marker(m, rate))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1",
@@ -133,20 +129,66 @@ pub fn write_otio_file(
         audio_clips_converted: total_a,
         media_assets_linked: project.media_assets.len(),
         bins_created: 0,
-        markers_written: seq.markers.len(),
+        markers_written: total_markers,
         grades_attached: 0,
         effect_markers_injected: 0,
         messages,
     })
 }
 
-fn serialize_track(track: &Track, rate: f64) -> Value {
+fn serialize_marker(m: &nle_core::Marker, rate: f64) -> Value {
+    json!({
+        "OTIO_SCHEMA": "Marker.2",
+        "name": m.name,
+        "color": m.color.to_ascii_uppercase(),
+        "comment": m.comment,
+        "marked_range": {
+            "OTIO_SCHEMA": "TimeRange.1",
+            "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": m.frame as f64 },
+            "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": m.duration_frames.max(1) as f64 }
+        }
+    })
+}
+
+fn serialize_transition(tr: &nle_core::Transition, rate: f64) -> Value {
+    let dur = (tr.end_frame - tr.start_frame).max(1) as f64;
+    let (in_off, out_off) = match tr.alignment.as_str() {
+        "start" => (0.0, dur),
+        "end" => (dur, 0.0),
+        _ => {
+            let half = (dur / 2.0).floor();
+            (half, (dur - half).max(0.0))
+        }
+    };
+    json!({
+        "OTIO_SCHEMA": "Transition.1",
+        "name": tr.name,
+        "transition_type": "SMPTE_Dissolve",
+        "in_offset": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": in_off },
+        "out_offset": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": out_off }
+    })
+}
+
+fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, usize) {
     let mut sorted = track.clips.clone();
     sorted.sort_by_key(|c| c.start_frame);
+    let mut transitions = track.transitions.clone();
+    transitions.sort_by_key(|t| t.start_frame);
+    let mut used_tr = vec![false; transitions.len()];
+
     let mut children = Vec::new();
     let mut cursor = 0i64;
+    let mut markers_written = 0usize;
 
     for clip in &sorted {
+        // Interleave any transition whose cut boundary lands at or near clip.start_frame
+        for (ti, tr) in transitions.iter().enumerate() {
+            if !used_tr[ti] && tr.start_frame <= clip.start_frame && tr.end_frame >= clip.start_frame {
+                children.push(serialize_transition(tr, rate));
+                used_tr[ti] = true;
+            }
+        }
+
         if clip.start_frame > cursor {
             children.push(json!({
                 "OTIO_SCHEMA": "Gap.1",
@@ -163,6 +205,50 @@ fn serialize_track(track: &Track, rate: f64) -> Value {
         } else {
             format!("file://{}", clip.media_path.replace('\\', "/"))
         };
+
+        let mut effects = Vec::new();
+        let abs_speed = clip.speed_percent.abs();
+        let signed_scalar = if clip.reversed && clip.speed_percent > 0.0 {
+            -clip.speed_percent / 100.0
+        } else {
+            clip.speed_percent / 100.0
+        };
+        let is_freeze = abs_speed < 0.01;
+        let is_retimed = !is_freeze && ((signed_scalar - 1.0).abs() > 1e-4 || clip.reversed);
+        if is_freeze {
+            effects.push(json!({
+                "OTIO_SCHEMA": "FreezeFrame.1",
+                "name": "FreezeFrame",
+                "effect_name": "FreezeFrame"
+            }));
+        } else if is_retimed {
+            effects.push(json!({
+                "OTIO_SCHEMA": "LinearTimeWarp.1",
+                "name": "LinearTimeWarp",
+                "effect_name": "LinearTimeWarp",
+                "time_scalar": signed_scalar
+            }));
+        }
+
+        let clip_markers: Vec<Value> = if include_markers {
+            markers_written += clip.markers.len();
+            clip.markers
+                .iter()
+                .map(|m| serialize_marker(m, rate))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let tl_dur = clip.duration_frames().max(1) as f64;
+        let src_dur = if is_freeze {
+            tl_dur
+        } else if is_retimed {
+            (tl_dur * signed_scalar.abs()).max(1.0)
+        } else {
+            tl_dur
+        };
+
         children.push(json!({
             "OTIO_SCHEMA": "Clip.2",
             "name": clip.name,
@@ -175,17 +261,29 @@ fn serialize_track(track: &Track, rate: f64) -> Value {
             "source_range": {
                 "OTIO_SCHEMA": "TimeRange.1",
                 "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": clip.source_in_frame as f64 },
-                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": clip.duration_frames().max(1) as f64 }
-            }
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": src_dur }
+            },
+            "effects": effects,
+            "markers": clip_markers
         }));
         cursor = clip.end_frame.max(cursor);
     }
 
-    json!({
-        "OTIO_SCHEMA": "Track.1",
-        "name": track.name,
-        "kind": if track.kind == TrackKind::Video { "Video" } else { "Audio" },
-        "enabled": track.enabled,
-        "children": children
-    })
+    // Emit any remaining trailing transitions (e.g. fade-out at end of track)
+    for (ti, tr) in transitions.iter().enumerate() {
+        if !used_tr[ti] {
+            children.push(serialize_transition(tr, rate));
+        }
+    }
+
+    (
+        json!({
+            "OTIO_SCHEMA": "Track.1",
+            "name": track.name,
+            "kind": if track.kind == TrackKind::Video { "Video" } else { "Audio" },
+            "enabled": track.enabled,
+            "children": children
+        }),
+        markers_written,
+    )
 }

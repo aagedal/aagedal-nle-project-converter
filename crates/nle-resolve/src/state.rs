@@ -228,10 +228,8 @@ fn length_field(field_num: u32, bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Encode Resolve 21 sequence markers into `Sm2SequenceLockableBlob.FieldsBlob` hex.
-/// DaVinci Resolve keys timeline markers by frame, so multiple markers landing on the
-/// same frame are merged into one combined marker rather than silently overwriting each other.
-pub fn encode_timeline_markers(markers: &[Marker]) -> String {
+/// Build the inner protobuf bytes for Resolve marker map field `2` (merging same-frame markers).
+fn encode_markers_proto_field(markers: &[Marker]) -> Vec<u8> {
     let mut by_frame: BTreeMap<i64, Marker> = BTreeMap::new();
     for m in markers {
         let frame = m.frame.max(0);
@@ -289,12 +287,15 @@ pub fn encode_timeline_markers(markers: &[Marker]) -> String {
         entries.extend_from_slice(&length_field(2, &entry));
     }
 
-    let proto = length_field(2, &entries);
+    length_field(2, &entries)
+}
+
+fn wrap_lockable_blob_hex(proto: &[u8]) -> String {
     let mut blob_data = Vec::with_capacity(9 + proto.len());
     blob_data.extend_from_slice(&10001u32.to_be_bytes());
     blob_data.extend_from_slice(&((proto.len() + 1) as u32).to_be_bytes());
     blob_data.push(0x80);
-    blob_data.extend_from_slice(&proto);
+    blob_data.extend_from_slice(proto);
 
     let key = encode_utf16be("BlobData");
     let mut fields_blob = Vec::new();
@@ -309,6 +310,14 @@ pub fn encode_timeline_markers(markers: &[Marker]) -> String {
     hex_encode(&fields_blob)
 }
 
+/// Encode Resolve 21 sequence markers into `Sm2SequenceLockableBlob.FieldsBlob` hex.
+/// DaVinci Resolve keys timeline markers by frame, so multiple markers landing on the
+/// same frame are merged into one combined marker rather than silently overwriting each other.
+pub fn encode_timeline_markers(markers: &[Marker]) -> String {
+    let proto = encode_markers_proto_field(markers);
+    wrap_lockable_blob_hex(&proto)
+}
+
 pub fn sequence_lockable_blob_xml(sequence_db_id: &str, markers: &[Marker]) -> String {
     let fields_blob = encode_timeline_markers(markers);
     let blob_id = Uuid::new_v4();
@@ -317,30 +326,36 @@ pub fn sequence_lockable_blob_xml(sequence_db_id: &str, markers: &[Marker]) -> S
     )
 }
 
-pub fn clip_color_lockable_blob_xml(clip_db_id: &str, resolve_color: u32) -> String {
-    let proto = encode_protobuf(&[ProtoField::varint(5, (resolve_color as u64) * 2)]);
-    let mut blob_data = Vec::with_capacity(9 + proto.len());
-    blob_data.extend_from_slice(&10001u32.to_be_bytes());
-    blob_data.extend_from_slice(&((proto.len() + 1) as u32).to_be_bytes());
-    blob_data.push(0x80);
-    blob_data.extend_from_slice(&proto);
-
-    let key = encode_utf16be("BlobData");
-    let mut fields_blob = Vec::new();
-    fields_blob.extend_from_slice(&1u32.to_be_bytes());
-    fields_blob.extend_from_slice(&1u32.to_be_bytes());
-    fields_blob.extend_from_slice(&(key.len() as u32).to_be_bytes());
-    fields_blob.extend_from_slice(&key);
-    fields_blob.extend_from_slice(&12u32.to_be_bytes());
-    fields_blob.push(0);
-    fields_blob.extend_from_slice(&(blob_data.len() as u32).to_be_bytes());
-    fields_blob.extend_from_slice(&blob_data);
-
-    let hex = hex_encode(&fields_blob);
+/// Encode a Resolve `Sm2TiItemLockableBlob` combining optional per-clip markers (field 2)
+/// and optional clip label color enum (field 5) into a single blob.
+pub fn clip_item_lockable_blob_xml(
+    clip_db_id: &str,
+    markers: &[Marker],
+    resolve_color: Option<u32>,
+) -> Option<String> {
+    if markers.is_empty() && resolve_color.is_none() {
+        return None;
+    }
+    let mut proto = Vec::new();
+    if !markers.is_empty() {
+        proto.extend_from_slice(&encode_markers_proto_field(markers));
+    }
+    if let Some(color) = resolve_color {
+        proto.extend_from_slice(&encode_protobuf(&[ProtoField::varint(
+            5,
+            (color as u64) * 2,
+        )]));
+    }
+    let hex = wrap_lockable_blob_hex(&proto);
     let blob_id = Uuid::new_v4();
-    format!(
+    Some(format!(
         "<Element><Sm2TiItemLockableBlob DbId=\"{blob_id}\"><FieldsBlob>{hex}</FieldsBlob><BlobOwner>{clip_db_id}</BlobOwner><DbSavedTime>0</DbSavedTime></Sm2TiItemLockableBlob></Element>"
-    )
+    ))
+}
+
+pub fn clip_color_lockable_blob_xml(clip_db_id: &str, resolve_color: u32) -> String {
+    clip_item_lockable_blob_xml(clip_db_id, &[], Some(resolve_color))
+        .expect("resolve_color is Some")
 }
 
 /// Resolve standard MediaPoolItem metadata enum IDs (verified in Resolve Studio 21.2).

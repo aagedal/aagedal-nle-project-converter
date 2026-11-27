@@ -1,7 +1,7 @@
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use nle_core::{
-    flatten_nested_and_multicam_clips, AlphaMode, Clip, ClipSourceKind, ConversionMessage,
+    flatten_nested_and_multicam_clips, AlphaMode, BlendMode, Clip, ClipSourceKind, ConversionMessage,
     ConversionOptions, ConversionReport, DataLevels, LumetriData, Marker, MediaAsset, MediaKind,
     MotionTransform, NleError, NleFormat, NleResult, Project, ProjectWriter, Rational,
     RetimeInterpolation, Sequence, SequenceKind, Severity, Track, TrackKind, Transition,
@@ -166,6 +166,7 @@ struct MediaHandle {
     markers_id: u64,
     is_stereo: bool,
     asset_duration_ticks: i64,
+    pixel_aspect_ratio: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -964,6 +965,7 @@ impl<'a> PrprojBuilder<'a> {
             markers_id,
             is_stereo,
             asset_duration_ticks: dur_ticks,
+            pixel_aspect_ratio: asset.pixel_aspect_ratio,
         }
     }
 
@@ -1936,12 +1938,27 @@ impl<'a> PrprojBuilder<'a> {
                 }
             }
 
-            let has_out = out_idx.is_some() || matches!(tr.alignment.as_str(), "center" | "end");
-            let has_in = in_idx.is_some() || matches!(tr.alignment.as_str(), "center" | "start");
-            let alignment_ticks = match tr.alignment.as_str() {
-                "start" => 0,
-                "end" => dur_ticks,
-                _ => dur_ticks / 2,
+            let (has_out, has_in, alignment_ticks) = match (out_idx.is_some(), in_idx.is_some()) {
+                (false, true) => (false, true, 0),
+                (true, false) => (true, false, dur_ticks),
+                (true, true) => {
+                    let align = match tr.alignment.as_str() {
+                        "start" => 0,
+                        "end" => dur_ticks,
+                        _ => dur_ticks / 2,
+                    };
+                    (true, true, align)
+                }
+                (false, false) => {
+                    let ho = matches!(tr.alignment.as_str(), "center" | "end");
+                    let hi = matches!(tr.alignment.as_str(), "center" | "start");
+                    let align = match tr.alignment.as_str() {
+                        "start" => 0,
+                        "end" => dur_ticks,
+                        _ => dur_ticks / 2,
+                    };
+                    (ho, hi, align)
+                }
             };
 
             let ti_id = match kind {
@@ -2155,6 +2172,14 @@ impl<'a> PrprojBuilder<'a> {
             .unwrap_or_default();
         let cw = if clip.source_width > 0 { clip.source_width } else { seq_w };
         let ch = if clip.source_height > 0 { clip.source_height } else { seq_h };
+        let par_str = self
+            .media_by_id
+            .get(&clip.media_id)
+            .or_else(|| self.media_by_path.get(&clip.media_path))
+            .and_then(|h| h.pixel_aspect_ratio)
+            .filter(|par| par.is_finite() && *par > 0.0 && (*par - 1.0).abs() > 1e-4)
+            .map(|par| format!("{},10000", (par * 10_000.0).round() as i64))
+            .unwrap_or_else(|| "1,1".to_string());
 
         self.push(format!(
             "\t<VideoClipTrackItem ObjectID=\"{ti_id}\" ClassID=\"368b0406-29e3-4923-9fcd-094fbf9a1089\" Version=\"8\">\n\
@@ -2173,7 +2198,7 @@ impl<'a> PrprojBuilder<'a> {
              \t\t</ClipTrackItem>\n\
              \t\t<ToneMapSettings>{{\"peak\":-1,\"version\":3}}</ToneMapSettings>\n\
              \t\t<FrameRect>0,0,{cw},{ch}</FrameRect>\n\
-             \t\t<PixelAspectRatio>1,1</PixelAspectRatio>\n\
+             \t\t<PixelAspectRatio>{par_str}</PixelAspectRatio>\n\
              \t</VideoClipTrackItem>"
         ));
 
@@ -2453,14 +2478,15 @@ impl<'a> PrprojBuilder<'a> {
 
     fn emit_video_component_chain(&mut self, clip: &Clip, report: &mut ConversionReport) -> u64 {
         let mut comp_ids: Vec<u64> = Vec::new();
-        let has_custom_opacity = (clip.opacity - 100.0).abs() > 1e-3;
+        let has_custom_opacity =
+            (clip.opacity - 100.0).abs() > 1e-3 || !clip.blend_mode.is_normal();
         let has_custom_motion = !clip.motion.is_identity();
 
         if has_custom_motion {
             comp_ids.push(self.emit_motion_component(&clip.motion));
         }
         if has_custom_opacity {
-            comp_ids.push(self.emit_opacity_component(clip.opacity));
+            comp_ids.push(self.emit_opacity_component(clip.opacity, clip.blend_mode));
         }
         let mut next_comp_id = 3u32;
         if self.options.include_lumetri_grades {
@@ -2480,6 +2506,30 @@ impl<'a> PrprojBuilder<'a> {
         });
         if has_stabilization {
             comp_ids.push(self.emit_warp_stabilizer_component(next_comp_id));
+            next_comp_id += 1;
+        }
+        // Attach matched third-party Adobe/MediaCore video filter plugins (e.g. `AE.AGDL Multi-Layer Anonymizer`)
+        for eff in &clip.effects {
+            if !eff.enabled || eff.is_intrinsic || eff.media_kind != TrackKind::Video {
+                continue;
+            }
+            if !eff.match_name.starts_with("AE.") {
+                continue;
+            }
+            let lower = eff.match_name.to_ascii_lowercase();
+            if lower.contains("adbe motion")
+                || lower.contains("adbe opacity")
+                || lower.contains("lumetri")
+                || lower.contains("subspacestabilizer")
+            {
+                continue;
+            }
+            comp_ids.push(self.emit_generic_video_filter_component(
+                &eff.display_name,
+                &eff.match_name,
+                next_comp_id,
+            ));
+            next_comp_id += 1;
         }
 
         let chain_id = self.alloc_id();
@@ -2556,11 +2606,12 @@ impl<'a> PrprojBuilder<'a> {
         cid
     }
 
-    fn emit_opacity_component(&mut self, opacity: f64) -> u64 {
+    fn emit_opacity_component(&mut self, opacity: f64, blend_mode: BlendMode) -> u64 {
         let clamped = opacity.clamp(0.0, 100.0);
+        let (bm_param2, bm_param3) = blend_mode.to_premiere_params();
         let p_op = self.emit_float_param("Opacity", 1, clamped, 0.0, 100.0, None, None);
-        let p_bm1 = self.emit_enum_param("Blend Mode", 2, 18, 0, 27, Some(10));
-        let p_bm2 = self.emit_enum_param("Blend Mode", 3, 0, 0, 31, None);
+        let p_bm1 = self.emit_enum_param("Blend Mode", 2, bm_param2 as i32, 0, 27, Some(10));
+        let p_bm2 = self.emit_enum_param("Blend Mode", 3, bm_param3 as i32, 0, 31, None);
         let cid = self.alloc_id();
         self.push(format!(
             "\t<VideoFilterComponent ObjectID=\"{cid}\" ClassID=\"d10da199-beea-4dd1-b941-ed3a78766d50\" Version=\"9\">\n\
@@ -2665,17 +2716,32 @@ impl<'a> PrprojBuilder<'a> {
     }
 
     fn emit_warp_stabilizer_component(&mut self, comp_id_num: u32) -> u64 {
+        self.emit_generic_video_filter_component(
+            "Warp Stabilizer",
+            "AE.ADBE SubspaceStabilizer",
+            comp_id_num,
+        )
+    }
+
+    fn emit_generic_video_filter_component(
+        &mut self,
+        display_name: &str,
+        match_name: &str,
+        comp_id_num: u32,
+    ) -> u64 {
         let cid = self.alloc_id();
         self.push(format!(
             "\t<VideoFilterComponent ObjectID=\"{cid}\" ClassID=\"d10da199-beea-4dd1-b941-ed3a78766d50\" Version=\"9\">\n\
              \t\t<Component Version=\"7\">\n\
              \t\t\t<Params Version=\"1\" />\n\
              \t\t\t<ID>{comp_id_num}</ID>\n\
-             \t\t\t<DisplayName>Warp Stabilizer</DisplayName>\n\
+             \t\t\t<DisplayName>{}</DisplayName>\n\
              \t\t</Component>\n\
              \t\t<VideoFilterType>2</VideoFilterType>\n\
-             \t\t<MatchName>AE.ADBE SubspaceStabilizer</MatchName>\n\
-             \t</VideoFilterComponent>"
+             \t\t<MatchName>{}</MatchName>\n\
+             \t</VideoFilterComponent>",
+            xml_escape(display_name),
+            xml_escape(match_name)
         ));
         cid
     }
@@ -3081,13 +3147,20 @@ fn resolve_multicam_angle_index(active_angle: Option<&str>, track_names: &[Strin
 
 fn map_video_transition<'a>(name: &'a str, effect_id: &'a str) -> (&'a str, &'a str) {
     let lower = format!("{name} {effect_id}").to_ascii_lowercase();
-    if lower.contains("dip to black") || lower.contains("dip to color") {
+    if lower.contains("dip to black")
+        || lower.contains("dip to color")
+        || lower.contains("fade to color")
+    {
         ("Dip to Black", "AE.ADBE Dip to Black")
     } else if lower.contains("dip to white") {
         ("Dip to White", "AE.ADBE Dip to White")
+    } else if lower.contains("non-additive") || lower.contains("non additive") {
+        ("Non-Additive Dissolve", "AE.ADBE Non-Additive Dissolve")
     } else if lower.contains("additive") {
         ("Additive Dissolve", "AE.ADBE Additive Dissolve")
-    } else if lower.contains("film dissolve") || lower.contains("smooth cut") {
+    } else if lower.contains("morph cut") || lower.contains("smooth cut") || lower.contains("flow") {
+        ("Morph Cut", "AE.ADBE Morph Cut")
+    } else if lower.contains("film dissolve") {
         ("Film Dissolve", "AE.ADBE Film Dissolve")
     } else if lower.contains("wipe") {
         ("Wipe", "AE.ADBE Wipe")
@@ -3098,9 +3171,9 @@ fn map_video_transition<'a>(name: &'a str, effect_id: &'a str) -> (&'a str, &'a 
 
 fn map_audio_transition<'a>(name: &'a str, effect_id: &'a str) -> (&'a str, &'a str) {
     let lower = format!("{name} {effect_id}").to_ascii_lowercase();
-    if lower.contains("0db") || lower.contains("constant gain") {
+    if lower.contains("0db") || lower.contains("0 db") || lower.contains("constant gain") {
         ("Constant Gain", "Constant Gain")
-    } else if lower.contains("-3db") || lower.contains("exponential") {
+    } else if lower.contains("-3db") || lower.contains("-3 db") || lower.contains("exponential") {
         ("Exponential Fade", "Exponential Fade")
     } else {
         ("Constant Power", "Constant Power")

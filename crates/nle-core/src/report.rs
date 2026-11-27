@@ -1,4 +1,4 @@
-use crate::model::{NleFormat, Project};
+use crate::model::{ClipSourceKind, NleFormat, Project, SequenceKind};
 use crate::time::frames_to_timecode;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -38,6 +38,9 @@ pub struct ConversionOptions {
     pub include_clip_colors: bool,
     pub include_lumetri_grades: bool,
     pub inject_effect_review_markers: bool,
+    /// When true, flatten nested sequences, compound clips, and multicam cuts into underlying source media clips.
+    #[serde(default)]
+    pub flatten_nested_and_multicam: bool,
     pub relink_rules: Vec<PathRelinkRule>,
 }
 
@@ -57,6 +60,7 @@ impl Default for ConversionOptions {
             include_clip_colors: true,
             include_lumetri_grades: true,
             inject_effect_review_markers: true,
+            flatten_nested_and_multicam: false,
             relink_rules: Vec::new(),
         }
     }
@@ -82,6 +86,8 @@ pub struct ConversionReport {
 pub struct SequenceSummary {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: SequenceKind,
     pub width: u32,
     pub height: u32,
     pub fps_label: String,
@@ -93,6 +99,12 @@ pub struct SequenceSummary {
     pub audio_clip_count: usize,
     pub marker_count: usize,
     pub effect_count: usize,
+    #[serde(default)]
+    pub transition_count: usize,
+    #[serde(default)]
+    pub retimed_clip_count: usize,
+    #[serde(default)]
+    pub nested_clip_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,9 +147,32 @@ impl ProjectInspection {
                     .flat_map(|t| t.clips.iter())
                     .map(|c| c.effects.iter().filter(|e| !e.is_intrinsic).count() + c.lumetri_effects.len())
                     .sum();
+                let transition_count: usize = seq
+                    .video_tracks
+                    .iter()
+                    .chain(seq.audio_tracks.iter())
+                    .map(|t| t.transitions.len())
+                    .sum();
+                let retimed_clip_count: usize = seq
+                    .video_tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .filter(|c| {
+                        (c.speed_percent - 100.0).abs() > 0.01
+                            || c.reversed
+                            || c.speed_keyframes.len() > 2
+                    })
+                    .count();
+                let nested_clip_count: usize = seq
+                    .video_tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .filter(|c| c.source_kind != ClipSourceKind::Media)
+                    .count();
                 SequenceSummary {
                     id: seq.id.clone(),
                     name: seq.name.clone(),
+                    kind: seq.kind,
                     width: seq.width,
                     height: seq.height,
                     fps_label: seq.frame_rate.label(),
@@ -149,6 +184,9 @@ impl ProjectInspection {
                     audio_clip_count,
                     marker_count: seq.markers.len(),
                     effect_count,
+                    transition_count,
+                    retimed_clip_count,
+                    nested_clip_count,
                 }
             })
             .collect();

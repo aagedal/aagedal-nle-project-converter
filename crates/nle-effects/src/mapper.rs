@@ -634,6 +634,8 @@ mod tests {
                     source_height: 1080,
                     speed_percent: 100.0,
                     reversed: false,
+                    speed_keyframes: vec![],
+                    retime_interpolation: nle_core::RetimeInterpolation::Default,
                     enabled: true,
                     audio_channel: 1,
                     link_group_id: None,

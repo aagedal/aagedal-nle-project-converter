@@ -1,8 +1,10 @@
 use nle_core::{
-    ConversionOptions, ConversionReport, NleError, NleFormat, NleResult, Project, ProjectWriter,
-    Sequence, Track, TrackKind,
+    flatten_nested_and_multicam_clips, ClipSourceKind, ConversionMessage, ConversionOptions,
+    ConversionReport, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
+    SequenceKind, Track, TrackKind,
 };
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
@@ -24,11 +26,30 @@ impl ProjectWriter for OtioWriter {
 }
 
 /// Write an OpenTimelineIO (`.otio`) JSON file from the canonical `Project` IR.
+/// Automatically flattens nested/compound/multicam clips into source media clips so
+/// every OTIO `ExternalReference` resolves to a real media file.
 pub fn write_otio_file(
     project: &Project,
     output_path: &Path,
     options: &ConversionOptions,
 ) -> NleResult<ConversionReport> {
+    let has_nested = project.sequences.iter().any(|s| {
+        s.video_tracks
+            .iter()
+            .chain(s.audio_tracks.iter())
+            .any(|t| t.clips.iter().any(|c| c.source_kind != ClipSourceKind::Media))
+    });
+    let mut messages: Vec<ConversionMessage> = Vec::new();
+    let project_cow: Cow<'_, Project> = if options.flatten_nested_and_multicam || has_nested {
+        let mut cloned = project.clone();
+        let flat = flatten_nested_and_multicam_clips(&mut cloned);
+        messages.extend(flat.messages);
+        Cow::Owned(cloned)
+    } else {
+        Cow::Borrowed(project)
+    };
+    let project = project_cow.as_ref();
+
     let selected: Vec<&Sequence> = if options.selected_sequence_ids.is_empty() {
         project.sequences.iter().collect()
     } else {
@@ -39,7 +60,10 @@ pub fn write_otio_file(
             .collect()
     };
     let seq = selected
-        .first()
+        .iter()
+        .copied()
+        .find(|s| s.kind == SequenceKind::Timeline)
+        .or_else(|| selected.first().copied())
         .ok_or_else(|| NleError::InvalidFormat("No sequences selected for OTIO export".into()))?;
 
     let rate = seq.frame_rate.as_f64();
@@ -112,7 +136,7 @@ pub fn write_otio_file(
         markers_written: seq.markers.len(),
         grades_attached: 0,
         effect_markers_injected: 0,
-        messages: Vec::new(),
+        messages,
     })
 }
 

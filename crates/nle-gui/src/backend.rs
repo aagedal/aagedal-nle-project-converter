@@ -1,5 +1,6 @@
 use nle_core::{
-    apply_relink_rules, ConversionOptions, ConversionReport, NleFormat, Project, ProjectInspection,
+    apply_relink_rules, flatten_nested_and_multicam_clips, ConversionOptions, ConversionReport,
+    NleFormat, Project, ProjectInspection,
 };
 use nle_effects::{
     analyze_project_effects, apply_effect_decisions, EffectMappingPlan, EffectMappingPreset,
@@ -90,6 +91,13 @@ pub fn run_conversion(
 
     apply_relink_rules(&mut project, &options.relink_rules);
 
+    let mut pre_messages = Vec::new();
+    if options.flatten_nested_and_multicam {
+        let flat = flatten_nested_and_multicam_clips(&mut project);
+        pre_messages.extend(flat.messages);
+        options.flatten_nested_and_multicam = false;
+    }
+
     let plan = analyze_project_effects(
         &project,
         &options.selected_sequence_ids,
@@ -134,7 +142,9 @@ pub fn run_conversion(
     };
 
     report.effect_markers_injected = fx_summary.markers_injected;
-    report.messages.extend(fx_summary.messages);
+    pre_messages.append(&mut report.messages);
+    pre_messages.extend(fx_summary.messages);
+    report.messages = pre_messages;
     Ok(report)
 }
 

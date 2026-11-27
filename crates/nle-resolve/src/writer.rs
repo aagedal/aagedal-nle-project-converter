@@ -13,13 +13,17 @@ use crate::state::{
     configure_project_color_blob, media_metadata_lockable_blob_xml, patch_project_setup_defaults,
     premiere_label_to_resolve_color, sequence_lockable_blob_xml,
 };
-use crate::timemap::{build_media_timemap, build_still_timemap, retimed_source_in, STILL_SOURCE_IN};
+use crate::timemap::{
+    build_media_timemap, build_speed_ramp_timemap, build_still_timemap, retimed_source_in,
+    STILL_SOURCE_IN,
+};
 use nle_core::{
-    Clip, ClipSourceKind, ConversionMessage, ConversionOptions, ConversionReport, MediaKind,
-    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
-    SequenceKind, Severity,
+    flatten_nested_and_multicam_clips, Clip, ClipSourceKind, ConversionMessage, ConversionOptions,
+    ConversionReport, MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project,
+    ProjectWriter, RetimeInterpolation, Sequence, SequenceKind, Severity,
 };
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
@@ -53,6 +57,17 @@ pub fn write_drp_file(
     output_path: &Path,
     options: &ConversionOptions,
 ) -> NleResult<ConversionReport> {
+    let mut pre_messages: Vec<ConversionMessage> = Vec::new();
+    let project_cow: Cow<'_, Project> = if options.flatten_nested_and_multicam {
+        let mut cloned = project.clone();
+        let flat = flatten_nested_and_multicam_clips(&mut cloned);
+        pre_messages.extend(flat.messages);
+        Cow::Owned(cloned)
+    } else {
+        Cow::Borrowed(project)
+    };
+    let project = project_cow.as_ref();
+
     let mut selected_sequences: Vec<&Sequence> = if options.selected_sequence_ids.is_empty() {
         project.sequences.iter().collect()
     } else {
@@ -130,12 +145,27 @@ pub fn write_drp_file(
         .find(|s| s.contains("neutral-still.png"))
         .unwrap_or(&mp_video_tpl)
         .clone();
-    let mp_audio_tpl = mp_audio_templates
+    let mp_audio_wav_tpl = mp_audio_templates
         .iter()
         .find(|s| s.contains("neutral-audio.wav"))
         .or_else(|| mp_audio_templates.first())
         .ok_or_else(|| NleError::InvalidFormat("Template missing audio media pool node".into()))?
         .clone();
+    let mp_audio_mp3_tpl = mp_audio_templates
+        .iter()
+        .find(|s| s.contains("neutral-audio.mp3"))
+        .unwrap_or(&mp_audio_wav_tpl)
+        .clone();
+    let mp_audio_flac_tpl = mp_audio_templates
+        .iter()
+        .find(|s| s.contains("neutral-audio.flac"))
+        .unwrap_or(&mp_audio_wav_tpl)
+        .clone();
+    let mp_audio_tpls = AudioPoolTemplates {
+        wav: &mp_audio_wav_tpl,
+        mp3: &mp_audio_mp3_tpl,
+        flac: &mp_audio_flac_tpl,
+    };
 
     let ti_video_templates = extract_elements_by_tag(&orig_seq_xml, "Sm2TiVideoClip");
     let ti_audio_templates = extract_elements_by_tag(&orig_seq_xml, "Sm2TiAudioClip");
@@ -241,7 +271,7 @@ pub fn write_drp_file(
     let mut timeline_clip_blocks: Vec<(String, String)> = Vec::new(); // (source_seq_id, <Element>...</Element>)
     let mut timeline_handles: Vec<String> = Vec::new();
     let mut lockable_blobs: Vec<String> = Vec::new();
-    let mut messages: Vec<ConversionMessage> = Vec::new();
+    let mut messages: Vec<ConversionMessage> = pre_messages;
 
     let mut total_video_clips = 0usize;
     let mut total_audio_clips = 0usize;
@@ -334,7 +364,7 @@ pub fn write_drp_file(
                             true,
                             &mp_video_tpl,
                             &mp_still_tpl,
-                            &mp_audio_tpl,
+                            &mp_audio_tpls,
                             &mut media_pool_ids,
                             &mut media_pool_entries,
                             &mut lockable_blobs,
@@ -392,6 +422,9 @@ pub fn write_drp_file(
 
                 let timemap = if clip.media_kind == MediaKind::Image && container_target.is_none() {
                     build_still_timemap()
+                } else if clip.speed_keyframes.len() > 2 {
+                    build_speed_ramp_timemap(&clip.speed_keyframes)
+                        .unwrap_or_else(|| build_media_timemap(asset_dur, src_fps, signed_speed, false))
                 } else {
                     build_media_timemap(asset_dur, src_fps, signed_speed, false)
                 };
@@ -410,10 +443,11 @@ pub fn write_drp_file(
                     node = set_child_text(&node, "FieldsBlob", &fb_hex);
                 }
 
-                // Motion static transform + Opacity
+                // Motion static transform + Opacity + Retime Interpolation
                 let motion_hex = build_static_video_effects_payload(
                     &clip.motion,
                     clip.opacity,
+                    clip.retime_interpolation,
                     (clip.source_width, clip.source_height),
                     (seq.width, seq.height),
                 );
@@ -521,7 +555,7 @@ pub fn write_drp_file(
                             video_backed,
                             &mp_video_tpl,
                             &mp_still_tpl,
-                            &mp_audio_tpl,
+                            &mp_audio_tpls,
                             &mut media_pool_ids,
                             &mut media_pool_entries,
                             &mut lockable_blobs,
@@ -579,7 +613,12 @@ pub fn write_drp_file(
                 fps_bytes.extend_from_slice(&[0u8; 8]);
                 node = set_child_text(&node, "MediaFrameRate", &hex_encode(&fps_bytes));
 
-                let timemap = build_media_timemap(asset_dur, src_fps, signed_speed, true);
+                let timemap = if clip.speed_keyframes.len() > 2 {
+                    build_speed_ramp_timemap(&clip.speed_keyframes)
+                        .unwrap_or_else(|| build_media_timemap(asset_dur, src_fps, signed_speed, true))
+                } else {
+                    build_media_timemap(asset_dur, src_fps, signed_speed, true)
+                };
                 node = set_child_text(&node, "MediaTimemapBA", &timemap);
                 node = set_child_text(&node, "EffectFiltersBA", "");
 
@@ -900,7 +939,7 @@ pub fn write_drp_file(
                 is_video,
                 &mp_video_tpl,
                 &mp_still_tpl,
-                &mp_audio_tpl,
+                &mp_audio_tpls,
                 &mut media_pool_ids,
                 &mut media_pool_entries,
                 &mut lockable_blobs,
@@ -1115,6 +1154,114 @@ fn load_template_members() -> NleResult<BTreeMap<String, Vec<u8>>> {
     Ok(map)
 }
 
+struct AudioPoolTemplates<'a> {
+    wav: &'a str,
+    mp3: &'a str,
+    flac: &'a str,
+}
+
+impl<'a> AudioPoolTemplates<'a> {
+    fn select_for_path(&self, path: &str) -> &'a str {
+        let ext = Path::new(&path.replace('\\', "/"))
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "mp3" => self.mp3,
+            "flac" => self.flac,
+            _ => self.wav,
+        }
+    }
+}
+
+/// Infer native DaVinci Resolve video & audio codec strings for `BtVideoInfo/Clip`, `BtAudioInfo/Clip`,
+/// and `BtAudioInfo/TracksBA` (`CodecName`) so generated `MediaPoolItem`s never inherit misleading
+/// placeholder `"avc1"` / `"AAC"` strings from the scaffold template when source media is ProRes,
+/// HEVC, MXF, RAW, WAV, MP3, FLAC, etc.
+fn infer_resolve_codecs(
+    full_path: &str,
+    file_name: &str,
+    is_still: bool,
+    is_standalone_audio: bool,
+    explicit_video_codec: Option<&str>,
+    explicit_audio_codec: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let ext = Path::new(&full_path.replace('\\', "/"))
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let lower_name = file_name.to_ascii_lowercase();
+
+    let video_codec = if is_still || is_standalone_audio {
+        None
+    } else if let Some(vc) = explicit_video_codec.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(vc.to_string())
+    } else {
+        match ext.as_str() {
+            "mp4" | "m4v" => {
+                if lower_name.contains("hevc")
+                    || lower_name.contains("h265")
+                    || lower_name.contains("h.265")
+                {
+                    Some("hvc1".to_string())
+                } else {
+                    Some("avc1".to_string())
+                }
+            }
+            "mov" => {
+                if lower_name.contains("4444") {
+                    Some("ap4h".to_string())
+                } else if lower_name.contains("prores") && lower_name.contains("hq") {
+                    Some("apch".to_string())
+                } else if lower_name.contains("prores") && lower_name.contains("lt") {
+                    Some("apcs".to_string())
+                } else if lower_name.contains("prores") && lower_name.contains("proxy") {
+                    Some("apco".to_string())
+                } else if lower_name.contains("prores") {
+                    Some("apcn".to_string())
+                } else if lower_name.contains("hevc")
+                    || lower_name.contains("h265")
+                    || lower_name.contains("h.265")
+                {
+                    Some("hvc1".to_string())
+                } else if lower_name.contains("dnxhr") || lower_name.contains("dnxhd") {
+                    Some("AVdn".to_string())
+                } else {
+                    // Omit placeholder codec so Resolve probes the actual MOV codec on relink
+                    None
+                }
+            }
+            "r3d" => Some("RED".to_string()),
+            "braw" => Some("BRAW".to_string()),
+            "ari" | "arx" => Some("ARRI".to_string()),
+            "crm" => Some("CRM".to_string()),
+            // MXF, MKV, AVI, WebM, etc.: avoid stamping misleading "avc1"
+            _ => None,
+        }
+    };
+
+    let audio_codec = if is_still {
+        None
+    } else if let Some(ac) = explicit_audio_codec.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(ac.to_string())
+    } else {
+        match ext.as_str() {
+            "wav" | "bwf" | "aif" | "aiff" | "caf" | "mov" | "mxf" | "r3d" | "braw" | "ari"
+            | "arx" | "crm" => Some("Linear PCM".to_string()),
+            "mp3" => Some("MP3".to_string()),
+            "flac" => Some("FLAC".to_string()),
+            "mp4" | "m4v" | "m4a" | "aac" => Some("AAC".to_string()),
+            "opus" | "webm" => Some("Opus".to_string()),
+            "ogg" => Some("Vorbis".to_string()),
+            _ => None,
+        }
+    };
+
+    (video_codec, audio_codec)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ensure_media_pool_item(
     pkey: &str,
@@ -1123,7 +1270,7 @@ fn ensure_media_pool_item(
     is_video: bool,
     mp_video_tpl: &str,
     mp_still_tpl: &str,
-    mp_audio_tpl: &str,
+    mp_audio_tpls: &AudioPoolTemplates<'_>,
     media_pool_ids: &mut HashMap<String, String>,
     media_pool_entries: &mut Vec<(String, String)>,
     lockable_blobs: &mut Vec<String>,
@@ -1134,21 +1281,22 @@ fn ensure_media_pool_item(
     let item_id = Uuid::new_v4().to_string();
     media_pool_ids.insert(pkey.to_string(), item_id.clone());
 
-    let tpl = if is_video {
-        if clip.media_kind == MediaKind::Image {
-            mp_still_tpl
-        } else {
-            mp_video_tpl
-        }
-    } else {
-        mp_audio_tpl
-    };
-
     let full_path = if !clip.media_path.is_empty() {
         clip.media_path.clone()
     } else {
         format!("/{}", clip.name)
     };
+    let is_still = is_video && clip.media_kind == MediaKind::Image;
+    let tpl = if is_video {
+        if is_still {
+            mp_still_tpl
+        } else {
+            mp_video_tpl
+        }
+    } else {
+        mp_audio_tpls.select_for_path(&full_path)
+    };
+
     let display_name = Path::new(&full_path.replace('\\', "/"))
         .file_name()
         .and_then(|s| s.to_str())
@@ -1168,6 +1316,15 @@ fn ensure_media_pool_item(
     let height = asset.map(|a| a.height).unwrap_or(clip.source_height);
     let source_start = asset.map(|a| a.source_tc_frame).unwrap_or(0);
     let sample_rate = asset.map(|a| a.audio_sample_rate).unwrap_or(48_000);
+    let audio_channels = asset.map(|a| a.audio_channels).unwrap_or(2);
+    let (vcodec, acodec) = infer_resolve_codecs(
+        &full_path,
+        &display_name,
+        is_still,
+        !is_video,
+        asset.and_then(|a| a.video_codec.as_deref()),
+        asset.and_then(|a| a.audio_codec.as_deref()),
+    );
 
     let mut node = replace_root_db_id(tpl, &item_id);
     node = set_child_text(&node, "UniqueMediaPoolItemId", &Uuid::new_v4().to_string());
@@ -1182,8 +1339,11 @@ fn ensure_media_pool_item(
         height,
         source_start,
         sample_rate,
+        audio_channels,
         !is_video,
         asset.and_then(|a| a.color_space.as_deref()),
+        vcodec.as_deref(),
+        acodec.as_deref(),
     )?;
     node = rewritten;
 
@@ -1208,7 +1368,7 @@ fn ensure_media_pool_asset(
     is_video: bool,
     mp_video_tpl: &str,
     mp_still_tpl: &str,
-    mp_audio_tpl: &str,
+    mp_audio_tpls: &AudioPoolTemplates<'_>,
     media_pool_ids: &mut HashMap<String, String>,
     media_pool_entries: &mut Vec<(String, String)>,
     lockable_blobs: &mut Vec<String>,
@@ -1219,21 +1379,22 @@ fn ensure_media_pool_asset(
     let item_id = Uuid::new_v4().to_string();
     media_pool_ids.insert(pkey.to_string(), item_id.clone());
 
-    let tpl = if is_video {
-        if asset.media_kind == MediaKind::Image {
-            mp_still_tpl
-        } else {
-            mp_video_tpl
-        }
-    } else {
-        mp_audio_tpl
-    };
-
     let full_path = if !asset.path.is_empty() {
         asset.path.clone()
     } else {
         format!("/{}", asset.name)
     };
+    let is_still = is_video && asset.media_kind == MediaKind::Image;
+    let tpl = if is_video {
+        if is_still {
+            mp_still_tpl
+        } else {
+            mp_video_tpl
+        }
+    } else {
+        mp_audio_tpls.select_for_path(&full_path)
+    };
+
     let display_name = Path::new(&full_path.replace('\\', "/"))
         .file_name()
         .and_then(|s| s.to_str())
@@ -1246,6 +1407,15 @@ fn ensure_media_pool_asset(
     let height = asset.height;
     let source_start = asset.source_tc_frame;
     let sample_rate = asset.audio_sample_rate;
+    let audio_channels = asset.audio_channels;
+    let (vcodec, acodec) = infer_resolve_codecs(
+        &full_path,
+        &display_name,
+        is_still,
+        !is_video,
+        asset.video_codec.as_deref(),
+        asset.audio_codec.as_deref(),
+    );
 
     let mut node = replace_root_db_id(tpl, &item_id);
     node = set_child_text(&node, "UniqueMediaPoolItemId", &Uuid::new_v4().to_string());
@@ -1260,8 +1430,11 @@ fn ensure_media_pool_asset(
         height,
         source_start,
         sample_rate,
+        audio_channels,
         !is_video,
         asset.color_space.as_deref(),
+        vcodec.as_deref(),
+        acodec.as_deref(),
     )?;
     node = rewritten;
 
@@ -1291,8 +1464,11 @@ fn rewrite_media_pool_av_blobs(
     height: u32,
     source_start: i64,
     sample_rate: u32,
+    audio_channels: u32,
     is_standalone_audio: bool,
     color_space: Option<&str>,
+    video_codec: Option<&str>,
+    audio_codec: Option<&str>,
 ) -> NleResult<(String, Option<String>)> {
     let mut out = xml.to_string();
     let mut primary_info_id: Option<String> = None;
@@ -1339,11 +1515,23 @@ fn rewrite_media_pool_av_blobs(
             if let Some(clip_hex) = extract_tag_inner(&block, "Clip") {
                 if let Ok(raw) = decode_wrapper_hex(&clip_hex) {
                     if let Ok(mut fields) = decode_protobuf(&raw) {
+                        let desired_codec = if info_tag == "BtVideoInfo" {
+                            video_codec
+                        } else {
+                            audio_codec
+                        };
+                        let mut saw_codec_field = false;
                         for f in &mut fields {
                             if let ProtoValue::Bytes(ref mut bytes) = f.value {
                                 match f.number {
                                     1 => *bytes = parent_dir.as_bytes().to_vec(),
                                     2 => *bytes = file_name.as_bytes().to_vec(),
+                                    5 => {
+                                        saw_codec_field = true;
+                                        if let Some(c) = desired_codec {
+                                            *bytes = c.as_bytes().to_vec();
+                                        }
+                                    }
                                     6 if info_tag == "BtVideoInfo" => {
                                         *bytes = file_name.as_bytes().to_vec()
                                     }
@@ -1352,6 +1540,18 @@ fn rewrite_media_pool_av_blobs(
                                     }
                                     _ => {}
                                 }
+                            }
+                        }
+                        if desired_codec.is_none() {
+                            // Strip placeholder codec (e.g. template "avc1" / "AAC") so Resolve probes accurately
+                            fields.retain(|f| f.number != 5);
+                        } else if !saw_codec_field {
+                            if let Some(c) = desired_codec {
+                                let insert_pos = fields
+                                    .iter()
+                                    .position(|f| f.number > 5)
+                                    .unwrap_or(fields.len());
+                                fields.insert(insert_pos, ProtoField::bytes(5, c.as_bytes().to_vec()));
                             }
                         }
                         let new_hex = encode_wrapper_hex(&encode_protobuf(&fields));
@@ -1407,14 +1607,22 @@ fn rewrite_media_pool_av_blobs(
                                 if let Ok(mut tfields) = decode_keyed_fields(track_raw) {
                                     let rate = if sample_rate > 0 { sample_rate } else { 48_000 };
                                     let sample_dur = ((duration as f64 / fps) * rate as f64).round() as i64;
+                                    let ch = if audio_channels > 0 { audio_channels } else { 2 };
                                     for (k, _, v) in &mut tfields {
                                         if k == "SampleRate" {
                                             *v = rate.to_be_bytes().to_vec();
                                         } else if k == "Duration" {
                                             *v = sample_dur.to_be_bytes().to_vec();
-                                        } else if k == "NumChannels" && is_standalone_audio {
-                                            *v = 2u32.to_be_bytes().to_vec();
+                                        } else if k == "NumChannels" && (is_standalone_audio || audio_channels > 0) {
+                                            *v = ch.to_be_bytes().to_vec();
+                                        } else if k == "CodecName" {
+                                            if let Some(ac) = audio_codec {
+                                                *v = encode_utf16be(ac);
+                                            }
                                         }
+                                    }
+                                    if audio_codec.is_none() {
+                                        tfields.retain(|(k, _, _)| k != "CodecName");
                                     }
                                     *track_raw = encode_keyed_fields(&tfields);
                                 }
@@ -1491,12 +1699,14 @@ fn build_clip_fields_blob(sibling_ids: &[String], active_angle: Option<&str>) ->
 fn build_static_video_effects_payload(
     motion: &MotionTransform,
     opacity: f64,
+    retime_interpolation: RetimeInterpolation,
     source_geom: (u32, u32),
     timeline_geom: (u32, u32),
 ) -> Option<String> {
     let has_motion = !motion.is_identity();
     let has_opacity = opacity.is_finite() && (opacity - 100.0).abs() > 1e-3;
-    if !has_motion && !has_opacity {
+    let has_retime_interp = retime_interpolation != RetimeInterpolation::Default;
+    if !has_motion && !has_opacity && !has_retime_interp {
         return None;
     }
 
@@ -1549,6 +1759,23 @@ fn build_static_video_effects_payload(
             ProtoField::bytes(9, param),
         ];
         outer_fields.push(ProtoField::bytes(1, encode_protobuf(&comp_fields)));
+    }
+
+    if has_retime_interp {
+        // Resolve Filter 44 (Retime & Scaling): param 91 RetimeProcess enum (1 = Nearest, 2 = Frame Blend, 3 = Optical Flow)
+        let enum_val: u64 = match retime_interpolation {
+            RetimeInterpolation::FrameSampling => 1,
+            RetimeInterpolation::FrameBlending => 2,
+            RetimeInterpolation::OpticalFlow => 3,
+            RetimeInterpolation::Default => 0,
+        };
+        if enum_val > 0 {
+            let kf = encode_protobuf(&[ProtoField::varint(4, enum_val)]);
+            let curve = encode_protobuf(&[ProtoField::bytes(1, kf)]);
+            let param = encode_protobuf(&[ProtoField::varint(1, 91), ProtoField::bytes(3, curve)]);
+            let retime_fields = vec![ProtoField::varint(1, 44), ProtoField::bytes(9, param)];
+            outer_fields.push(ProtoField::bytes(1, encode_protobuf(&retime_fields)));
+        }
     }
 
     let outer = encode_protobuf(&outer_fields);

@@ -48,6 +48,11 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                video_codec: Some("apch".into()),
+                audio_codec: Some("Linear PCM".into()),
+                alpha_mode: AlphaMode::Default,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: None,
                 metadata: BTreeMap::from([
                     ("Description".into(), "Studio interview A-cam".into()),
                     ("Comments".into(), "Best take".into()),
@@ -98,6 +103,8 @@ mod tests {
                         source_height: 2160,
                         speed_percent: 100.0,
                         reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::OpticalFlow,
                         enabled: true,
                         audio_channel: 1,
                         link_group_id: None,
@@ -152,6 +159,8 @@ mod tests {
                         source_height: 0,
                         speed_percent: 100.0,
                         reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::OpticalFlow,
                         enabled: true,
                         audio_channel: 1,
                         link_group_id: None,
@@ -237,6 +246,15 @@ mod tests {
             Some("bus-1")
         );
         assert_eq!(reread.media_assets.len(), 1);
+        assert_eq!(reread.media_assets[0].video_codec.as_deref(), Some("apch"));
+        assert_eq!(
+            reread.media_assets[0].audio_codec.as_deref(),
+            Some("Linear PCM")
+        );
+        assert_eq!(
+            reread.sequences[0].video_tracks[0].clips[0].retime_interpolation,
+            RetimeInterpolation::OpticalFlow
+        );
         assert_eq!(
             reread.media_assets[0].metadata.get("Description").map(String::as_str),
             Some("Studio interview A-cam")
@@ -308,6 +326,8 @@ mod tests {
                         source_height: 2160,
                         speed_percent: 100.0,
                         reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::OpticalFlow,
                         enabled: true,
                         audio_channel: 1,
                         link_group_id: None,
@@ -469,6 +489,11 @@ mod tests {
                 audio_channels: 2,
                 audio_sample_rate: 48_000,
                 color_space: None,
+                video_codec: None,
+                audio_codec: None,
+                alpha_mode: AlphaMode::Default,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: None,
                 metadata: BTreeMap::new(),
                 custom_metadata: BTreeMap::new(),
             }],
@@ -513,6 +538,8 @@ mod tests {
                             source_height: 1080,
                             speed_percent: 100.0,
                             reversed: false,
+                            speed_keyframes: vec![],
+                            retime_interpolation: RetimeInterpolation::Default,
                             enabled: true,
                             audio_channel: 1,
                             link_group_id: None,
@@ -573,6 +600,8 @@ mod tests {
                                 source_height: 1080,
                                 speed_percent: 100.0,
                                 reversed: false,
+                                speed_keyframes: vec![],
+                                retime_interpolation: RetimeInterpolation::Default,
                                 enabled: true,
                                 audio_channel: 1,
                                 link_group_id: Some("link-0".into()),
@@ -603,6 +632,8 @@ mod tests {
                                 source_height: 1080,
                                 speed_percent: -100.0,
                                 reversed: true,
+                                speed_keyframes: vec![],
+                                retime_interpolation: RetimeInterpolation::Default,
                                 enabled: true,
                                 audio_channel: 1,
                                 link_group_id: None,
@@ -647,6 +678,8 @@ mod tests {
                             source_height: 0,
                             speed_percent: 100.0,
                             reversed: false,
+                            speed_keyframes: vec![],
+                            retime_interpolation: RetimeInterpolation::Default,
                             enabled: true,
                             audio_channel: 1,
                             link_group_id: Some("link-0".into()),
@@ -702,6 +735,247 @@ mod tests {
         assert!((v_rev.speed_percent - (-100.0)).abs() < 1e-4);
         // 500 - 150 = 350 reversed record-in frame
         assert_eq!(v_rev.source_in_frame, 350);
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn native_codec_metadata_avoids_h264_aac_placeholder_leak() {
+        let project = Project {
+            name: "Codec Metadata Test".into(),
+            source_format: NleFormat::PremierePro,
+            media_assets: vec![
+                MediaAsset {
+                    id: "m-prores".into(),
+                    name: "Interview_ProRes422HQ.mov".into(),
+                    path: "/Media/Interview_ProRes422HQ.mov".into(),
+                    media_kind: MediaKind::Video,
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 2,
+                    audio_sample_rate: 48_000,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+                MediaAsset {
+                    id: "m-mxf".into(),
+                    name: "A001C002.mxf".into(),
+                    path: "/Media/A001C002.mxf".into(),
+                    media_kind: MediaKind::Video,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 4,
+                    audio_sample_rate: 48_000,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+                MediaAsset {
+                    id: "m-mp3".into(),
+                    name: "Music_Bed.mp3".into(),
+                    path: "/Media/Music_Bed.mp3".into(),
+                    media_kind: MediaKind::Audio,
+                    width: 0,
+                    height: 0,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 2,
+                    audio_sample_rate: 44_100,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+                MediaAsset {
+                    id: "m-flac".into(),
+                    name: "Score_Master.flac".into(),
+                    path: "/Media/Score_Master.flac".into(),
+                    media_kind: MediaKind::Audio,
+                    width: 0,
+                    height: 0,
+                    frame_rate: Rational::FPS_25,
+                    duration_frames: 250,
+                    source_tc_frame: 0,
+                    source_tc_string: "00:00:00:00".into(),
+                    audio_channels: 1,
+                    audio_sample_rate: 48_000,
+                    color_space: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    alpha_mode: AlphaMode::Default,
+                    data_levels: DataLevels::Auto,
+                    pixel_aspect_ratio: None,
+                    metadata: BTreeMap::new(),
+                    custom_metadata: BTreeMap::new(),
+                },
+            ],
+            sequences: vec![Sequence {
+                id: "s1".into(),
+                name: "Main".into(),
+                kind: SequenceKind::Timeline,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 100,
+                start_tc_frame: 0,
+                mark_in: None,
+                mark_out: None,
+                video_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Video,
+                    name: "V1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 0,
+                    output_bus_id: None,
+                    clips: vec![Clip {
+                        id: "c1".into(),
+                        name: "Interview_ProRes422HQ.mov".into(),
+                        media_id: "m-prores".into(),
+                        media_path: "/Media/Interview_ProRes422HQ.mov".into(),
+                        media_kind: MediaKind::Video,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
+                        start_frame: 0,
+                        end_frame: 100,
+                        source_in_frame: 0,
+                        source_out_frame: 100,
+                        source_in_ticks: None,
+                        source_out_ticks: None,
+                        source_fps: Rational::FPS_25,
+                        source_width: 3840,
+                        source_height: 2160,
+                        speed_percent: 100.0,
+                        reversed: false,
+                        speed_keyframes: vec![
+                            SpeedKeyframe { timeline_sec: 0.0, source_sec: 0.0 },
+                            SpeedKeyframe { timeline_sec: 2.0, source_sec: 1.0 },
+                            SpeedKeyframe { timeline_sec: 4.0, source_sec: 5.0 },
+                        ],
+                        retime_interpolation: RetimeInterpolation::FrameBlending,
+                        enabled: true,
+                        audio_channel: 0,
+                        link_group_id: None,
+                        label_name: None,
+                        label_preset_index: None,
+                        motion: MotionTransform::default(),
+                        opacity: 100.0,
+                        lumetri_effects: vec![],
+                        effects: vec![],
+                        markers: vec![],
+                    }],
+                    transitions: vec![],
+                    markers: vec![],
+                }],
+                audio_tracks: vec![Track {
+                    index: 1,
+                    kind: TrackKind::Audio,
+                    name: "A1".into(),
+                    enabled: true,
+                    locked: false,
+                    muted: false,
+                    solo: false,
+                    audio_channels: 1,
+                    output_bus_id: None,
+                    clips: vec![Clip {
+                        id: "a-ch3".into(),
+                        name: "Score_Master.flac".into(),
+                        media_id: "m-flac".into(),
+                        media_path: "/Media/Score_Master.flac".into(),
+                        media_kind: MediaKind::Audio,
+                        source_kind: ClipSourceKind::Media,
+                        active_angle: None,
+                        start_frame: 0,
+                        end_frame: 100,
+                        source_in_frame: 0,
+                        source_out_frame: 100,
+                        source_in_ticks: None,
+                        source_out_ticks: None,
+                        source_fps: Rational::FPS_25,
+                        source_width: 0,
+                        source_height: 0,
+                        speed_percent: 100.0,
+                        reversed: false,
+                        speed_keyframes: vec![],
+                        retime_interpolation: RetimeInterpolation::Default,
+                        enabled: true,
+                        audio_channel: 3,
+                        link_group_id: None,
+                        label_name: None,
+                        label_preset_index: None,
+                        motion: MotionTransform::default(),
+                        opacity: 100.0,
+                        lumetri_effects: vec![],
+                        effects: vec![],
+                        markers: vec![],
+                    }],
+                    transitions: vec![],
+                    markers: vec![],
+                }],
+                audio_buses: vec![],
+                markers: vec![],
+                metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        let out_path = std::env::temp_dir().join("aagedal_nle_codec_ramp_test.drp");
+        write_drp_file(&project, &out_path, &ConversionOptions::default()).expect("write .drp");
+
+        let reread = read_drp_file(&out_path).expect("re-read .drp");
+        let prores = reread.media_assets.iter().find(|a| a.name.contains("ProRes")).unwrap();
+        assert_eq!(prores.video_codec.as_deref(), Some("apch"));
+        assert_eq!(prores.audio_codec.as_deref(), Some("Linear PCM"));
+
+        let mxf = reread.media_assets.iter().find(|a| a.name.ends_with(".mxf")).unwrap();
+        assert_eq!(mxf.video_codec, None, "MXF must not inherit placeholder avc1");
+        assert_eq!(mxf.audio_codec.as_deref(), Some("Linear PCM"));
+        assert_eq!(mxf.audio_channels, 4);
+
+        let mp3 = reread.media_assets.iter().find(|a| a.name.ends_with(".mp3")).unwrap();
+        assert_eq!(mp3.audio_codec.as_deref(), Some("MP3"));
+        assert_eq!(mp3.audio_sample_rate, 44_100);
+
+        let flac = reread.media_assets.iter().find(|a| a.name.ends_with(".flac")).unwrap();
+        assert_eq!(flac.audio_codec.as_deref(), Some("FLAC"));
+        assert_eq!(flac.audio_channels, 1);
+
+        // Multi-point speed ramp + FrameBlending + VirtualAudioTrackBA channel 3 roundtrip
+        let vclip = &reread.sequences[0].video_tracks[0].clips[0];
+        assert_eq!(vclip.speed_keyframes.len(), 3);
+        assert!((vclip.speed_keyframes[1].timeline_sec - 2.0).abs() < 1e-6);
+        assert!((vclip.speed_keyframes[1].source_sec - 1.0).abs() < 1e-6);
+        assert_eq!(vclip.retime_interpolation, RetimeInterpolation::FrameBlending);
+
+        let aclip = &reread.sequences[0].audio_tracks[0].clips[0];
+        assert_eq!(aclip.audio_channel, 3);
 
         let _ = std::fs::remove_file(&out_path);
     }

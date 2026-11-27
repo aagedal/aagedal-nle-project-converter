@@ -12,7 +12,9 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     *,
 };
-use nle_core::{ConversionOptions, ConversionReport, NleFormat, PathRelinkRule, Severity};
+use nle_core::{
+    ConversionOptions, ConversionReport, NleFormat, PathRelinkRule, SequenceKind, Severity,
+};
 use nle_effects::{
     analyze_project_effects, DetectedEffectGroup, EffectMappingPreset, MappingAction,
     MappingFidelity, UserEffectDecisions,
@@ -101,10 +103,12 @@ pub struct ConverterApp {
 
     // Conversion options
     include_bins: bool,
+    include_unused_media: bool,
     include_markers: bool,
     include_clip_colors: bool,
     include_lumetri: bool,
     inject_fx_markers: bool,
+    flatten_nested_and_multicam: bool,
 
     // Inputs & Selects
     target_select: Entity<SelectState<Vec<TargetFormatItem>>>,
@@ -161,10 +165,12 @@ impl ConverterApp {
             selected_seq_ids: HashSet::new(),
             decisions: BTreeMap::new(),
             include_bins: true,
+            include_unused_media: true,
             include_markers: true,
             include_clip_colors: true,
             include_lumetri: true,
             inject_fx_markers: true,
+            flatten_nested_and_multicam: false,
             target_select,
             relink_from,
             relink_to,
@@ -417,11 +423,12 @@ impl ConverterApp {
             project_name: Some(loaded.inspection.name.clone()),
             selected_sequence_ids: self.selected_seq_ids.iter().cloned().collect(),
             include_bins: self.include_bins,
-            include_unused_media: true,
+            include_unused_media: self.include_unused_media,
             include_markers: self.include_markers,
             include_clip_colors: self.include_clip_colors,
             include_lumetri_grades: self.include_lumetri,
             inject_effect_review_markers: self.inject_fx_markers,
+            flatten_nested_and_multicam: self.flatten_nested_and_multicam,
             relink_rules,
         };
         let decisions = UserEffectDecisions {
@@ -882,7 +889,15 @@ impl ConverterApp {
                     .child(self.stat_box(rep.video_clips_converted.to_string(), "Video Clips", &mono))
                     .child(self.stat_box(rep.audio_clips_converted.to_string(), "Audio Clips", &mono))
                     .child(self.stat_box(rep.bins_created.to_string(), "Bins", &mono))
-                    .child(self.stat_box(rep.grades_attached.to_string(), "DRX Grades", &mono))
+                    .child(self.stat_box(
+                        rep.grades_attached.to_string(),
+                        if rep.target_format == NleFormat::DaVinciResolve {
+                            "DRX Grades"
+                        } else {
+                            "Color Grades"
+                        },
+                        &mono,
+                    ))
                     .child(self.stat_box(rep.markers_written.to_string(), "Markers", &mono))
                     .child(self.stat_box(
                         rep.effect_markers_injected.to_string(),
@@ -1028,7 +1043,7 @@ impl ConverterApp {
                 "{}×{} · {} fps · {}",
                 seq.width, seq.height, seq.fps_label, seq.duration_tc
             );
-            let specs_line2 = format!(
+            let mut specs_line2 = format!(
                 "V:{} ({} clips) · A:{} ({} clips) · {} mk · {} fx",
                 seq.video_track_count,
                 seq.video_clip_count,
@@ -1037,6 +1052,20 @@ impl ConverterApp {
                 seq.marker_count,
                 seq.effect_count
             );
+            if seq.transition_count > 0 {
+                specs_line2.push_str(&format!(" · {} tr", seq.transition_count));
+            }
+            if seq.retimed_clip_count > 0 {
+                specs_line2.push_str(&format!(" · {} retimed", seq.retimed_clip_count));
+            }
+            if seq.nested_clip_count > 0 {
+                specs_line2.push_str(&format!(" · {} nested", seq.nested_clip_count));
+            }
+            let kind_badge = match seq.kind {
+                SequenceKind::CompoundClip => Some(theme::pill("Compound", PillTone::Cyan)),
+                SequenceKind::MulticamClip => Some(theme::pill("Multicam", PillTone::Purple)),
+                SequenceKind::Timeline => None,
+            };
 
             let sid_text = sid.clone();
             h_flex()
@@ -1079,11 +1108,18 @@ impl ConverterApp {
                             this.reanalyze_effects(window, cx);
                         }))
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(theme::TEXT))
-                                .child(seq.name.clone()),
+                            h_flex()
+                                .items_center()
+                                .flex_wrap()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::TEXT))
+                                        .child(seq.name.clone()),
+                                )
+                                .when_some(kind_badge, |row, badge| row.child(badge)),
                         )
                         .child(
                             div()
@@ -1137,12 +1173,48 @@ impl ConverterApp {
                 )
             })
             .child(
-                div()
+                h_flex()
                     .pt(px(4.))
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::TEXT))
-                    .child("Sequences to Convert"),
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::TEXT))
+                            .child("Sequences to Convert"),
+                    )
+                    .when(insp.sequences.len() > 1, |hdr| {
+                        hdr.child(
+                            h_flex()
+                                .gap(px(6.))
+                                .child(
+                                    Button::new("seq-select-all")
+                                        .small()
+                                        .label("All")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if let Some(loaded) = &this.loaded {
+                                                this.selected_seq_ids = loaded
+                                                    .inspection
+                                                    .sequences
+                                                    .iter()
+                                                    .map(|s| s.id.clone())
+                                                    .collect();
+                                            }
+                                            this.reanalyze_effects(window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("seq-select-none")
+                                        .small()
+                                        .label("None")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.selected_seq_ids.clear();
+                                            this.reanalyze_effects(window, cx);
+                                        })),
+                                ),
+                        )
+                    }),
             )
             .child(v_flex().gap(px(8.)).children(sequence_rows));
 
@@ -1172,6 +1244,15 @@ impl ConverterApp {
                     })),
             )
             .child(
+                Checkbox::new("opt-unused-media")
+                    .checked(self.include_unused_media)
+                    .label("Preserve unplaced project bin media")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.include_unused_media = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Checkbox::new("opt-lumetri")
                     .checked(self.include_lumetri)
                     .label("Translate color grades (Lumetri Basic + Color Wheels ↔ Resolve Primaries)")
@@ -1192,7 +1273,7 @@ impl ConverterApp {
             .child(
                 Checkbox::new("opt-colors")
                     .checked(self.include_clip_colors)
-                    .label("Map Premiere clip label colors → Resolve clip colors")
+                    .label("Preserve clip label colors across NLEs")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.include_clip_colors = *checked;
                         cx.notify();
@@ -1204,6 +1285,15 @@ impl ConverterApp {
                     .label("Inject color-coded timeline markers for mapped/unmapped effects")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.inject_fx_markers = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Checkbox::new("opt-flatten-nested")
+                    .checked(self.flatten_nested_and_multicam)
+                    .label("Flatten nested sequences, compound & multicam clips to source media")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.flatten_nested_and_multicam = *checked;
                         cx.notify();
                     })),
             );

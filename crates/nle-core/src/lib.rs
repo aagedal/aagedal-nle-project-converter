@@ -1,9 +1,11 @@
 pub mod error;
+pub mod flatten;
 pub mod model;
 pub mod report;
 pub mod time;
 
 pub use error::{NleError, NleResult};
+pub use flatten::{flatten_nested_and_multicam_clips, FlattenSummary};
 pub use model::*;
 pub use report::*;
 pub use time::{frames_to_timecode, Rational, ADOBE_TICKS_PER_SECOND};

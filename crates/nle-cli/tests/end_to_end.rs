@@ -265,3 +265,112 @@ fn fcpxml_bundle_to_resolve_and_premiere_pipeline() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn flatten_multicam_and_speed_ramp_across_formats() {
+    let dir = std::env::temp_dir().join("aagedal_nle_flatten_ramp_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let fcpxml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.11">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="r2" name="CamA_ProRes422HQ.mov" uid="UID-A" start="0s" duration="250/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Media/CamA_ProRes422HQ.mov"/>
+    </asset>
+    <asset id="r3" name="CamB_MXF.mxf" uid="UID-B" start="0s" duration="250/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Media/CamB_MXF.mxf"/>
+    </asset>
+    <media id="r4" name="Studio_MC">
+      <multicam format="r1" tcStart="0s" tcFormat="NDF">
+        <mc-angle name="Camera 1" angleID="ang-1">
+          <asset-clip ref="r2" offset="0s" name="CamA_ProRes422HQ.mov" start="0s" duration="200/25s"/>
+        </mc-angle>
+        <mc-angle name="Camera 2" angleID="ang-2">
+          <asset-clip ref="r3" offset="0s" name="CamB_MXF.mxf" start="0s" duration="200/25s"/>
+        </mc-angle>
+      </multicam>
+    </media>
+  </resources>
+  <library>
+    <event name="Session">
+      <project name="MC_And_Ramp">
+        <sequence format="r1" duration="200/25s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <mc-clip ref="r4" offset="0s" name="Studio_MC" start="0s" duration="50/25s">
+              <mc-source angleID="ang-1" srcEnable="all"/>
+            </mc-clip>
+            <mc-clip ref="r4" offset="50/25s" name="Studio_MC" start="50/25s" duration="50/25s">
+              <mc-source angleID="ang-2" srcEnable="all"/>
+            </mc-clip>
+            <asset-clip ref="r2" offset="100/25s" name="SpeedRampShot" start="0s" duration="100/25s">
+              <timeMap>
+                <timept time="0s" value="0s" interp="smooth2"/>
+                <timept time="50/25s" value="25/25s" interp="smooth2"/>
+                <timept time="100/25s" value="125/25s" interp="smooth2"/>
+              </timeMap>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    let fcpxml_in = dir.join("input.fcpxml");
+    std::fs::write(&fcpxml_in, fcpxml).expect("write fcpxml");
+
+    let proj = nle_interchange::read_fcpxml_file(&fcpxml_in).expect("read fcpxml");
+    // Verify multi-point speed ramp was parsed from FCPXML <timeMap>
+    let main_seq = proj
+        .sequences
+        .iter()
+        .find(|s| s.kind == nle_core::SequenceKind::Timeline)
+        .expect("main timeline");
+    assert_eq!(main_seq.video_tracks[0].clips[2].speed_keyframes.len(), 3);
+
+    // 1. Export to Resolve .drp WITH flatten_nested_and_multicam = true
+    let drp_flat = dir.join("flattened.drp");
+    let flat_opts = ConversionOptions {
+        target_format: nle_core::NleFormat::DaVinciResolve,
+        flatten_nested_and_multicam: true,
+        ..Default::default()
+    };
+    let drp_rep = nle_resolve::write_drp_file(&proj, &drp_flat, &flat_opts).expect("write flat drp");
+    assert_eq!(drp_rep.sequences_converted, 1);
+
+    let reread_drp = nle_resolve::read_drp_file(&drp_flat).expect("read flat drp");
+    assert_eq!(reread_drp.sequences.len(), 1);
+    let clips = &reread_drp.sequences[0].video_tracks[0].clips;
+    assert_eq!(clips.len(), 3);
+    assert_eq!(clips[0].source_kind, nle_core::ClipSourceKind::Media);
+    assert_eq!(clips[0].media_path, "/Media/CamA_ProRes422HQ.mov");
+    assert_eq!(clips[1].source_kind, nle_core::ClipSourceKind::Media);
+    assert_eq!(clips[1].media_path, "/Media/CamB_MXF.mxf");
+    // Speed ramp survived FCPXML -> Resolve .drp -> readback!
+    assert_eq!(clips[2].speed_keyframes.len(), 3);
+
+    // Codec metadata in Resolve Media Pool reflects ProRes & MXF (no stale avc1)
+    let mxf_asset = reread_drp
+        .media_assets
+        .iter()
+        .find(|a| a.path.ends_with(".mxf"))
+        .expect("mxf asset");
+    assert_eq!(mxf_asset.video_codec, None);
+    assert_eq!(mxf_asset.audio_codec.as_deref(), Some("Linear PCM"));
+
+    // 2. Export original unflattened project directly to OTIO and FCP7 XML -> auto-flattens to real paths!
+    let otio_out = dir.join("auto_flat.otio");
+    let fcp7_out = dir.join("auto_flat.xml");
+    nle_interchange::write_otio_file(&proj, &otio_out, &ConversionOptions::default())
+        .expect("write otio");
+    nle_interchange::write_fcp7_xml_file(&proj, &fcp7_out, &ConversionOptions::default())
+        .expect("write fcp7");
+    let otio_txt = std::fs::read_to_string(&otio_out).unwrap();
+    let fcp7_txt = std::fs::read_to_string(&fcp7_out).unwrap();
+    assert!(otio_txt.contains("CamA_ProRes422HQ.mov") && otio_txt.contains("CamB_MXF.mxf"));
+    assert!(fcp7_txt.contains("CamA_ProRes422HQ.mov") && fcp7_txt.contains("CamB_MXF.mxf"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

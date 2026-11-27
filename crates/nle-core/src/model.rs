@@ -113,6 +113,43 @@ pub enum ClipSourceKind {
     MulticamClip,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlphaMode {
+    #[default]
+    Default,
+    None,
+    Straight,
+    Premultiplied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataLevels {
+    #[default]
+    Auto,
+    Video,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetimeInterpolation {
+    #[default]
+    Default,
+    FrameSampling,
+    FrameBlending,
+    OpticalFlow,
+}
+
+/// Control point on a clip's variable speed ramp curve mapping clip-local timeline seconds
+/// to source media seconds (0-based from media start).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpeedKeyframe {
+    pub timeline_sec: f64,
+    pub source_sec: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkerScope {
@@ -189,6 +226,21 @@ pub struct MediaAsset {
     pub audio_channels: u32,
     pub audio_sample_rate: u32,
     pub color_space: Option<String>,
+    /// Native video codec identifier (e.g. `"avc1"`, `"hvc1"`, `"apcn"`, `"apch"`), if known.
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    /// Native audio codec identifier (e.g. `"Linear PCM"`, `"AAC"`, `"MP3"`, `"FLAC"`), if known.
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    /// Clip Attributes alpha interpretation (`Default`, `None` / Ignore Alpha, `Straight`, `Premultiplied`).
+    #[serde(default)]
+    pub alpha_mode: AlphaMode,
+    /// Clip Attributes video data levels (`Auto`, `Video` / legal range, `Full` range).
+    #[serde(default)]
+    pub data_levels: DataLevels,
+    /// Optional overridden pixel aspect ratio (`1.0` = square, `1.3333` = anamorphic, etc.).
+    #[serde(default)]
+    pub pixel_aspect_ratio: Option<f64>,
     /// Standard file/clip metadata (e.g. Description, Comments, Keywords, Scene, Shot, Take,
     /// Angle, Camera #, Director, Location, Tape Name, etc.).
     #[serde(default)]
@@ -305,6 +357,13 @@ pub struct Clip {
     pub source_height: u32,
     pub speed_percent: f64,
     pub reversed: bool,
+    /// Optional multi-point variable speed ramp curve (`timeline_sec -> source_sec`).
+    /// Empty for constant-speed / freeze clips.
+    #[serde(default)]
+    pub speed_keyframes: Vec<SpeedKeyframe>,
+    /// Retime frame interpolation mode (`FrameSampling` / `FrameBlending` / `OpticalFlow`).
+    #[serde(default)]
+    pub retime_interpolation: RetimeInterpolation,
     pub enabled: bool,
     pub audio_channel: u32,
     pub link_group_id: Option<String>,

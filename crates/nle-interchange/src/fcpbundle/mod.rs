@@ -4,10 +4,10 @@ pub mod sqlite;
 use crate::fcpxml::time::FcpTime;
 use bplist::{parse_bplist_nskeyed, PlistValue};
 use nle_core::{
-    frames_to_timecode, Clip, ClipSourceKind, ColorConfig, EffectCategory, EffectInstance,
-    EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform, NleError,
-    NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational, Sequence, SequenceKind,
-    Track, TrackKind,
+    frames_to_timecode, AlphaMode, Clip, ClipSourceKind, ColorConfig, DataLevels, EffectCategory,
+    EffectInstance, EffectParameter, Marker, MarkerScope, MediaAsset, MediaKind, MotionTransform,
+    NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
+    RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind,
 };
 use roxmltree::{Document, ParsingOptions};
 use sqlite::{SqlValue, SqliteDb};
@@ -219,6 +219,11 @@ impl BundleAsset {
             audio_channels: self.audio_channels,
             audio_sample_rate: self.audio_sample_rate,
             color_space: self.color_space.clone(),
+            video_codec: None,
+            audio_codec: None,
+            alpha_mode: AlphaMode::Default,
+            data_levels: DataLevels::Auto,
+            pixel_aspect_ratio: None,
             metadata: BTreeMap::new(),
             custom_metadata: BTreeMap::new(),
         }
@@ -924,6 +929,8 @@ fn parse_bundle_item(
                         source_height: vp_h,
                         speed_percent: 100.0,
                         reversed: false,
+                        speed_keyframes: Vec::new(),
+                        retime_interpolation: RetimeInterpolation::Default,
                         enabled: true,
                         audio_channel: 0,
                         link_group_id: link_group_id.clone(),
@@ -963,6 +970,8 @@ fn parse_bundle_item(
                         source_height: vp_h,
                         speed_percent: 100.0,
                         reversed: false,
+                        speed_keyframes: Vec::new(),
+                        retime_interpolation: RetimeInterpolation::Default,
                         enabled: true,
                         audio_channel: 1,
                         link_group_id,

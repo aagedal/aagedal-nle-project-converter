@@ -1,10 +1,10 @@
 use crate::lumetri::{child_text, find_descendant, nested_text, parse_keyframe_scalar, parse_lumetri_component};
 use flate2::read::GzDecoder;
 use nle_core::{
-    frames_to_timecode, AudioBus, Clip, ClipSourceKind, ColorConfig, EffectCategory,
-    EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset, MediaKind,
-    MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader, Rational,
-    Sequence, SequenceKind, Track, TrackKind, Transition,
+    frames_to_timecode, AlphaMode, AudioBus, Clip, ClipSourceKind, ColorConfig, DataLevels,
+    EffectCategory, EffectInstance, EffectParameter, LumetriData, Marker, MarkerScope, MediaAsset,
+    MediaKind, MotionTransform, NleError, NleFormat, NleResult, Project, ProjectBin, ProjectReader,
+    Rational, RetimeInterpolation, Sequence, SequenceKind, Track, TrackKind, Transition,
 };
 use roxmltree::{Document, Node};
 use std::collections::{BTreeMap, HashMap};
@@ -702,6 +702,10 @@ fn extract_media_asset(
         .unwrap_or(Rational::FPS_25);
 
     let color_space = video_stream_node.and_then(extract_video_stream_color_space);
+    let alpha_mode = video_stream_node
+        .map(extract_video_stream_alpha_mode)
+        .unwrap_or(AlphaMode::Default);
+    let pixel_aspect_ratio = video_stream_node.and_then(extract_video_stream_par);
 
     let ext = Path::new(&name)
         .extension()
@@ -732,9 +736,46 @@ fn extract_media_asset(
         audio_channels: 2,
         audio_sample_rate: 48_000,
         color_space,
+        video_codec: None,
+        audio_codec: None,
+        alpha_mode,
+        data_levels: DataLevels::Auto,
+        pixel_aspect_ratio,
         metadata: BTreeMap::new(),
         custom_metadata: BTreeMap::new(),
     })
+}
+
+fn extract_video_stream_alpha_mode(vs: Node<'_, '_>) -> AlphaMode {
+    let ignore_alpha = child_text(vs, "IgnoreAlpha")
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if ignore_alpha {
+        return AlphaMode::None;
+    }
+    match child_text(vs, "AlphaType").and_then(|s| s.trim().parse::<u32>().ok()) {
+        Some(0) => AlphaMode::None,
+        Some(1) => AlphaMode::Straight,
+        Some(2) | Some(3) => AlphaMode::Premultiplied,
+        _ => AlphaMode::Default,
+    }
+}
+
+fn extract_video_stream_par(vs: Node<'_, '_>) -> Option<f64> {
+    let overridden = child_text(vs, "IsPAROverridden")
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let raw = child_text(vs, "PixelAspectRatio")?;
+    let (n_str, d_str) = raw.split_once(',')?;
+    let num = n_str.trim().parse::<f64>().ok()?;
+    let den = d_str.trim().parse::<f64>().ok()?;
+    if num > 0.0 && den > 0.0 {
+        let ratio = num / den;
+        if overridden || (ratio - 1.0).abs() > 1e-4 {
+            return Some(ratio);
+        }
+    }
+    None
 }
 
 fn extract_video_stream_color_space(vs: Node<'_, '_>) -> Option<String> {
@@ -1304,8 +1345,11 @@ fn parse_clip(
     let mut source_tc_frame = 0i64;
     let mut sample_rate = 48_000u32;
     let mut media_color_space: Option<String> = None;
+    let mut media_alpha_mode = AlphaMode::Default;
+    let mut media_par: Option<f64> = None;
     let mut speed_percent = 100.0f64;
     let mut reversed = false;
+    let mut retime_interpolation = RetimeInterpolation::Default;
     let mut audio_channel = 1u32;
     let mut label_name: Option<String> = None;
     let mut label_preset_index: Option<u8> = None;
@@ -1417,10 +1461,23 @@ fn parse_clip(
                         source_fps = overridden_fps;
                     }
                     clip_color_space = extract_video_stream_color_space(vs);
+                    media_alpha_mode = extract_video_stream_alpha_mode(vs);
+                    media_par = extract_video_stream_par(vs);
                 }
                 if clip_color_space.is_some() {
                     media_color_space = clip_color_space;
                 }
+            }
+
+            if let Some(ti_type) = child_text(clip_el, "TimeInterpolationType")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                retime_interpolation = match ti_type {
+                    0 => RetimeInterpolation::FrameSampling,
+                    1 => RetimeInterpolation::FrameBlending,
+                    2 => RetimeInterpolation::OpticalFlow,
+                    _ => RetimeInterpolation::Default,
+                };
             }
 
             if let Some(inner) = clip_el.children().find(|n| n.has_tag_name("Clip")) {
@@ -1504,6 +1561,13 @@ fn parse_clip(
                 if existing.color_space.is_none() && media_color_space.is_some() {
                     existing.color_space = media_color_space.clone();
                 }
+                if existing.alpha_mode == AlphaMode::Default && media_alpha_mode != AlphaMode::Default
+                {
+                    existing.alpha_mode = media_alpha_mode;
+                }
+                if existing.pixel_aspect_ratio.is_none() && media_par.is_some() {
+                    existing.pixel_aspect_ratio = media_par;
+                }
             })
             .or_insert_with(|| MediaAsset {
                 id: resolved_media_id.clone(),
@@ -1523,6 +1587,11 @@ fn parse_clip(
                 audio_channels: 2,
                 audio_sample_rate: sample_rate,
                 color_space: media_color_space.clone(),
+                video_codec: None,
+                audio_codec: None,
+                alpha_mode: media_alpha_mode,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: media_par,
                 metadata: BTreeMap::new(),
                 custom_metadata: BTreeMap::new(),
             });
@@ -1710,6 +1779,8 @@ fn parse_clip(
         source_height: source_h,
         speed_percent,
         reversed,
+        speed_keyframes: Vec::new(),
+        retime_interpolation,
         enabled,
         audio_channel,
         link_group_id: link_map.get(ti_obj_id).cloned(),

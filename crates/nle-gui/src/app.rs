@@ -1,13 +1,25 @@
+use crate::about::open_about_window;
+use crate::actions::{
+    ApplyRecommendedEffects, CloseProject, CloseWindow, ConvertProject, CopyConversionLog,
+    DeselectAllSequences, DismissOverlay, LoadDemoProject, LoadEffectPreset, MinimizeWindow,
+    OpenProject, OpenSettings, OpenShortcuts, RevealOutput, SaveEffectPreset, SelectAllSequences,
+    ZoomWindow, CONVERT_KEYSTROKE, OPEN_PROJECT_KEYSTROKE, SETTINGS_KEYSTROKE,
+};
+use crate::assets;
 use crate::backend::{self, LoadedProject, SUPPORTED_TARGETS};
+use crate::settings::{AppSettings, AppSettingsGlobal, DefaultEffectPolicy};
+use crate::settings_view::{SettingsSection, SettingsView, SettingsViewEvent};
 use crate::theme::{self, PillTone};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants as _},
         checkbox::Checkbox,
         input::{Input, InputState},
+        kbd::Kbd,
         scroll::ScrollableElement as _,
         select::{Select, SelectEvent, SelectItem, SelectState},
-        ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, h_flex, v_flex,
+        ActiveTheme as _, Disableable as _, IconName, IndexPath, Selectable as _, Sizable as _,
+        h_flex, v_flex,
     },
     prelude::FluentBuilder as _,
     *,
@@ -21,6 +33,12 @@ use nle_effects::{
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivePage {
+    Converter,
+    Settings,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BulkEffectMode {
@@ -65,6 +83,25 @@ impl SelectItem for EffectActionItem {
     }
 }
 
+fn format_conversion_log(rep: &ConversionReport) -> String {
+    rep.messages
+        .iter()
+        .map(|m| {
+            let prefix = match (&m.sequence, &m.clip) {
+                (Some(s), Some(c)) => format!("[{s} · {c}] "),
+                (Some(s), None) => format!("[{s}] "),
+                _ => String::new(),
+            };
+            format!("[{:?}] {}{} ({})", m.severity, prefix, m.message, m.code)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn shortcut_hint_badge(keystroke: &'static str) -> Option<Kbd> {
+    Keystroke::parse(keystroke).ok().map(|s| Kbd::new(s).outline())
+}
+
 fn target_items() -> Vec<TargetFormatItem> {
     SUPPORTED_TARGETS
         .iter()
@@ -103,6 +140,10 @@ fn effect_action_items(fx: &DetectedEffectGroup) -> Vec<EffectActionItem> {
 }
 
 pub struct ConverterApp {
+    focus_handle: FocusHandle,
+    active_page: ActivePage,
+    settings_view: Entity<SettingsView>,
+
     loaded: Option<LoadedProject>,
     target_format: NleFormat,
     selected_seq_ids: HashSet<String>,
@@ -137,21 +178,56 @@ pub struct ConverterApp {
 
 impl ConverterApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+
+        let initial_settings = cx
+            .try_global::<AppSettingsGlobal>()
+            .map(|g| g.0.clone())
+            .unwrap_or_default();
+
+        let targets = target_items();
+        let initial_target_row = targets
+            .iter()
+            .position(|item| item.format == initial_settings.default_target_format)
+            .unwrap_or(0);
+        let initial_target = targets
+            .get(initial_target_row)
+            .map(|item| item.format)
+            .unwrap_or(NleFormat::DaVinciResolve);
+
         let target_select = cx.new(|cx| {
             SelectState::new(
-                target_items(),
-                Some(IndexPath::default().row(0)),
+                targets,
+                Some(IndexPath::default().row(initial_target_row)),
                 window,
                 cx,
             )
         });
 
+        let initial_relink_from = if initial_settings.auto_fill_relink {
+            initial_settings.default_relink_from.clone()
+        } else {
+            String::new()
+        };
+        let initial_relink_to = if initial_settings.auto_fill_relink {
+            initial_settings.default_relink_to.clone()
+        } else {
+            String::new()
+        };
+
         let relink_from = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("From prefix (e.g. /Media)")
+            InputState::new(window, cx)
+                .placeholder("From prefix (e.g. /Media)")
+                .default_value(initial_relink_from)
         });
         let relink_to = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("To prefix (e.g. /Volumes/Edit)")
+            InputState::new(window, cx)
+                .placeholder("To prefix (e.g. /Volumes/Edit)")
+                .default_value(initial_relink_to)
         });
+
+        let settings_view = cx.new(|cx| SettingsView::new(window, cx));
 
         let relink_from_obs = cx.observe(&relink_from, |_, _, cx| {
             cx.notify();
@@ -170,23 +246,52 @@ impl ConverterApp {
             },
         );
 
+        let settings_sub = cx.subscribe_in(
+            &settings_view,
+            window,
+            |this, _, event: &SettingsViewEvent, window, cx| match event {
+                SettingsViewEvent::Changed => {
+                    if this.loaded.is_none() {
+                        let s = this.current_settings(cx);
+                        this.apply_defaults_from_settings(&s, window, cx);
+                    }
+                    cx.notify();
+                }
+                SettingsViewEvent::ApplyDefaultsToProject => {
+                    let s = this.current_settings(cx);
+                    this.apply_defaults_from_settings(&s, window, cx);
+                    this.status_toast =
+                        Some("Applied default settings to current project.".to_string());
+                    cx.notify();
+                }
+                SettingsViewEvent::BackToConverter => {
+                    this.active_page = ActivePage::Converter;
+                    window.focus(&this.focus_handle, cx);
+                    cx.notify();
+                }
+            },
+        );
+
         Self {
+            focus_handle,
+            active_page: ActivePage::Converter,
+            settings_view,
             loaded: None,
-            target_format: NleFormat::DaVinciResolve,
+            target_format: initial_target,
             selected_seq_ids: HashSet::new(),
             decisions: BTreeMap::new(),
-            include_bins: true,
-            include_unused_media: true,
-            include_markers: true,
-            include_clip_colors: true,
-            include_lumetri: true,
-            inject_fx_markers: true,
-            flatten_nested_and_multicam: false,
+            include_bins: initial_settings.default_include_bins,
+            include_unused_media: initial_settings.default_include_unused_media,
+            include_markers: initial_settings.default_include_markers,
+            include_clip_colors: initial_settings.default_include_clip_colors,
+            include_lumetri: initial_settings.default_include_lumetri,
+            inject_fx_markers: initial_settings.default_inject_fx_markers,
+            flatten_nested_and_multicam: initial_settings.default_flatten_nested,
             target_select,
             relink_from,
             relink_to,
             effect_selects: BTreeMap::new(),
-            _base_subscriptions: vec![target_sub, relink_from_obs],
+            _base_subscriptions: vec![target_sub, relink_from_obs, settings_sub],
             effect_subscriptions: Vec::new(),
             busy: false,
             busy_label: None,
@@ -196,12 +301,185 @@ impl ConverterApp {
         }
     }
 
+    fn current_settings(&self, cx: &App) -> AppSettings {
+        cx.try_global::<AppSettingsGlobal>()
+            .map(|g| g.0.clone())
+            .unwrap_or_default()
+    }
+
+    fn remember_directory(&self, path: &Path, cx: &mut Context<Self>) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if !parent.is_dir() {
+            return;
+        }
+        let dir_str = parent.to_string_lossy().into_owned();
+        if let Some(global) = cx.try_global::<AppSettingsGlobal>() {
+            if !global.0.remember_last_directory
+                || global.0.last_directory.as_deref() == Some(dir_str.as_str())
+            {
+                return;
+            }
+        } else {
+            return;
+        }
+        let updated = {
+            let g = cx.global_mut::<AppSettingsGlobal>();
+            g.0.last_directory = Some(dir_str);
+            g.0.clone()
+        };
+        let _ = updated.save();
+    }
+
+    fn apply_defaults_from_settings(
+        &mut self,
+        s: &AppSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.include_bins = s.default_include_bins;
+        self.include_unused_media = s.default_include_unused_media;
+        self.include_markers = s.default_include_markers;
+        self.include_clip_colors = s.default_include_clip_colors;
+        self.include_lumetri = s.default_include_lumetri;
+        self.inject_fx_markers = s.default_inject_fx_markers;
+        self.flatten_nested_and_multicam = s.default_flatten_nested;
+
+        if self.loaded.is_none() {
+            self.target_format = s.default_target_format;
+            self.target_select.update(cx, |state, cx| {
+                state.set_selected_value(&s.default_target_format, window, cx);
+            });
+        }
+
+        if s.auto_fill_relink {
+            let from_val = s.default_relink_from.clone();
+            let to_val = s.default_relink_to.clone();
+            self.relink_from.update(cx, |input, cx| {
+                input.set_value(from_val, window, cx);
+            });
+            self.relink_to.update(cx, |input, cx| {
+                input.set_value(to_val, window, cx);
+            });
+        }
+    }
+
+    pub fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.active_page = match self.active_page {
+            ActivePage::Converter => ActivePage::Settings,
+            ActivePage::Settings => ActivePage::Converter,
+        };
+        cx.notify();
+    }
+
+    pub fn open_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.active_page = ActivePage::Settings;
+        self.settings_view.update(cx, |view, cx| {
+            view.set_section(section, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn trigger_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_open_file(window, cx);
+    }
+
+    pub fn trigger_load_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_load_demo(window, cx);
+    }
+
+    pub fn trigger_convert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_convert(window, cx);
+    }
+
+    pub fn trigger_close_project(&mut self, cx: &mut Context<Self>) {
+        if self.loaded.is_none() || self.busy {
+            return;
+        }
+        self.loaded = None;
+        self.selected_seq_ids.clear();
+        self.decisions.clear();
+        self.effect_selects.clear();
+        self.effect_subscriptions.clear();
+        self.report = None;
+        self.error_msg = None;
+        self.status_toast = None;
+        self.active_page = ActivePage::Converter;
+        self.settings_view
+            .update(cx, |v, cx| v.set_has_loaded_project(false, cx));
+        cx.notify();
+    }
+
+    pub fn trigger_load_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loaded.is_some() {
+            self.on_load_preset(window, cx);
+        }
+    }
+
+    pub fn trigger_save_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loaded.is_some() {
+            self.on_save_preset(window, cx);
+        }
+    }
+
+    pub fn trigger_select_all_sequences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(loaded) = &self.loaded else {
+            return;
+        };
+        self.selected_seq_ids = loaded
+            .inspection
+            .sequences
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        self.reanalyze_effects(window, cx);
+    }
+
+    pub fn trigger_deselect_all_sequences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loaded.is_none() {
+            return;
+        }
+        self.selected_seq_ids.clear();
+        self.reanalyze_effects(window, cx);
+    }
+
+    pub fn trigger_apply_recommended_effects(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loaded.is_some() {
+            self.apply_bulk_effect_action(BulkEffectMode::Recommended, window, cx);
+        }
+    }
+
+    pub fn trigger_reveal_output(&mut self, cx: &mut Context<Self>) {
+        if let Some(rep) = &self.report {
+            cx.reveal_path(Path::new(&rep.output_path));
+        }
+    }
+
+    pub fn trigger_copy_conversion_log(&mut self, cx: &mut Context<Self>) {
+        let Some(rep) = &self.report else {
+            return;
+        };
+        if rep.messages.is_empty() {
+            return;
+        }
+        let log_text = format_conversion_log(rep);
+        cx.write_to_clipboard(ClipboardItem::new_string(log_text));
+        self.status_toast = Some("Copied conversion log to clipboard".to_string());
+        cx.notify();
+    }
+
     fn apply_loaded_project(
         &mut self,
         payload: LoadedProject,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let settings = self.current_settings(cx);
         let seq_set: HashSet<String> = payload
             .inspection
             .sequences
@@ -212,7 +490,12 @@ impl ConverterApp {
 
         let mut default_actions = BTreeMap::new();
         for fx in &payload.effect_plan.effects {
-            default_actions.insert(fx.key.clone(), fx.default_action.clone());
+            let action = match settings.default_effect_policy {
+                DefaultEffectPolicy::Recommended => fx.default_action.clone(),
+                DefaultEffectPolicy::MarkerOnly => MappingAction::PlaceMarkerOnly,
+                DefaultEffectPolicy::SkipAll => MappingAction::Skip,
+            };
+            default_actions.insert(fx.key.clone(), action);
         }
 
         self.target_format = target_fmt;
@@ -221,7 +504,23 @@ impl ConverterApp {
         self.report = None;
         self.error_msg = None;
         self.status_toast = None;
+        self.active_page = ActivePage::Converter;
         self.loaded = Some(payload);
+
+        if settings.auto_fill_relink
+            && self.relink_from.read(cx).value().trim().is_empty()
+            && !settings.default_relink_from.trim().is_empty()
+        {
+            let rf = settings.default_relink_from.clone();
+            let rt = settings.default_relink_to.clone();
+            self.relink_from
+                .update(cx, |input, cx| input.set_value(rf, window, cx));
+            self.relink_to
+                .update(cx, |input, cx| input.set_value(rt, window, cx));
+        }
+
+        self.settings_view
+            .update(cx, |v, cx| v.set_has_loaded_project(true, cx));
 
         self.target_select.update(cx, |state, cx| {
             state.set_selected_value(&target_fmt, window, cx);
@@ -335,6 +634,7 @@ impl ConverterApp {
         self.busy_label = Some("Inspecting project...".into());
         self.error_msg = None;
         let requested_target = self.target_format;
+        let remembered_path = path.clone();
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -346,6 +646,7 @@ impl ConverterApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 this.busy_label = None;
+                this.remember_directory(&remembered_path, cx);
                 match result {
                     Ok(payload) => this.apply_loaded_project(payload, window, cx),
                     Err(err) => {
@@ -366,17 +667,26 @@ impl ConverterApp {
         self.busy_label = Some("Opening project...".into());
         self.error_msg = None;
         let requested_target = self.target_format;
+        let last_dir = self.current_settings(cx).last_dir_path();
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let picked = rfd::AsyncFileDialog::new()
+            let mut dialog = rfd::AsyncFileDialog::new()
                 .set_title("Open NLE Project File")
-                .add_filter("NLE Projects", &["prproj", "drp", "drt", "fcpbundle", "fcpxml", "fcpxmld"])
+                .add_filter(
+                    "NLE Projects",
+                    &["prproj", "drp", "drt", "fcpbundle", "fcpxml", "fcpxmld"],
+                )
                 .add_filter("Premiere Pro Project", &["prproj"])
                 .add_filter("DaVinci Resolve Project", &["drp", "drt"])
-                .add_filter("Final Cut Pro Library / XML", &["fcpbundle", "fcpxml", "fcpxmld"])
-                .pick_file()
-                .await;
+                .add_filter(
+                    "Final Cut Pro Library / XML",
+                    &["fcpbundle", "fcpxml", "fcpxmld"],
+                );
+            if let Some(dir) = last_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let picked = dialog.pick_file().await;
 
             let Some(handle) = picked else {
                 let _ = this.update(cx, |this, cx| {
@@ -388,6 +698,7 @@ impl ConverterApp {
             };
 
             let path = handle.path().to_path_buf();
+            let remembered_path = path.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { backend::load_and_inspect_project(&path, requested_target) })
@@ -396,6 +707,7 @@ impl ConverterApp {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 this.busy_label = None;
+                this.remember_directory(&remembered_path, cx);
                 match result {
                     Ok(payload) => this.apply_loaded_project(payload, window, cx),
                     Err(err) => {
@@ -484,15 +796,20 @@ impl ConverterApp {
         self.busy_label = Some("Converting...".into());
         self.error_msg = None;
         self.status_toast = None;
+        let settings = self.current_settings(cx);
+        let last_dir = settings.last_dir_path();
+        let auto_reveal = settings.auto_reveal_output;
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let saved = rfd::AsyncFileDialog::new()
+            let mut dialog = rfd::AsyncFileDialog::new()
                 .set_title("Save Converted Project")
                 .set_file_name(&default_name)
-                .add_filter(filter_name, &[ext])
-                .save_file()
-                .await;
+                .add_filter(filter_name, &[ext]);
+            if let Some(dir) = last_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let saved = dialog.save_file().await;
 
             let Some(handle) = saved else {
                 let _ = this.update(cx, |this, cx| {
@@ -504,6 +821,7 @@ impl ConverterApp {
             };
 
             let output_path = handle.path().to_path_buf();
+            let remembered_path = output_path.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
@@ -514,8 +832,12 @@ impl ConverterApp {
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 this.busy_label = None;
+                this.remember_directory(&remembered_path, cx);
                 match result {
                     Ok(report) => {
+                        if auto_reveal {
+                            cx.reveal_path(Path::new(&report.output_path));
+                        }
                         this.report = Some(report);
                     }
                     Err(err) => {
@@ -541,18 +863,22 @@ impl ConverterApp {
             },
         };
 
+        let last_dir = self.current_settings(cx).last_dir_path();
         cx.spawn_in(window, async move |this, cx| {
-            let saved = rfd::AsyncFileDialog::new()
+            let mut dialog = rfd::AsyncFileDialog::new()
                 .set_title("Save Effect Mapping Preset")
                 .set_file_name("nle-effect-preset.json")
-                .add_filter("Effect Preset JSON", &["json"])
-                .save_file()
-                .await;
+                .add_filter("Effect Preset JSON", &["json"]);
+            if let Some(dir) = last_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let saved = dialog.save_file().await;
 
             let Some(handle) = saved else {
                 return;
             };
             let path = handle.path().to_path_buf();
+            let remembered_path = path.clone();
             let path_display = path.to_string_lossy().into_owned();
             let result = cx
                 .background_executor()
@@ -560,6 +886,7 @@ impl ConverterApp {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
+                this.remember_directory(&remembered_path, cx);
                 match result {
                     Ok(()) => {
                         this.status_toast =
@@ -576,23 +903,28 @@ impl ConverterApp {
     }
 
     fn on_load_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last_dir = self.current_settings(cx).last_dir_path();
         cx.spawn_in(window, async move |this, cx| {
-            let picked = rfd::AsyncFileDialog::new()
+            let mut dialog = rfd::AsyncFileDialog::new()
                 .set_title("Load Effect Mapping Preset")
-                .add_filter("Effect Preset JSON", &["json"])
-                .pick_file()
-                .await;
+                .add_filter("Effect Preset JSON", &["json"]);
+            if let Some(dir) = last_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let picked = dialog.pick_file().await;
 
             let Some(handle) = picked else {
                 return;
             };
             let path = handle.path().to_path_buf();
+            let remembered_path = path.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move { backend::load_effect_preset(&path) })
                 .await;
 
             let _ = this.update_in(cx, |this, window, cx| {
+                this.remember_directory(&remembered_path, cx);
                 match result {
                     Ok(preset) => {
                         let total_detected = this.effect_selects.len();
@@ -622,6 +954,9 @@ impl ConverterApp {
     }
 
     fn render_topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_hints = self.current_settings(cx).show_shortcut_hints;
+        let in_settings = self.active_page == ActivePage::Settings;
+
         h_flex()
             .w_full()
             .items_center()
@@ -634,25 +969,24 @@ impl ConverterApp {
             .gap(px(16.))
             .child(
                 h_flex()
+                    .id("topbar-brand")
                     .items_center()
                     .gap(px(12.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.active_page == ActivePage::Settings {
+                            this.active_page = ActivePage::Converter;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        } else {
+                            open_about_window(cx);
+                        }
+                    }))
                     .child(
-                        div()
-                            .w(px(34.))
-                            .h(px(34.))
-                            .rounded(px(9.))
-                            .bg(linear_gradient(
-                                135.,
-                                linear_color_stop(rgb(theme::ACCENT), 0.),
-                                linear_color_stop(rgb(0x6366f1), 1.),
-                            ))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .font_weight(FontWeight::BOLD)
-                            .text_sm()
-                            .text_color(rgb(0xffffff))
-                            .child("AN"),
+                        img(assets::APP_ICON_ASSET)
+                            .w(px(36.))
+                            .h(px(36.))
+                            .rounded(px(8.)),
                     )
                     .child(
                         v_flex()
@@ -674,23 +1008,81 @@ impl ConverterApp {
             .child(
                 h_flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(8.))
+                    .when(!in_settings, |row| {
+                        row.child(
+                            Button::new("topbar-demo")
+                                .label("Load Demo .prproj")
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_load_demo(window, cx);
+                                })),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    Button::new("topbar-open")
+                                        .primary()
+                                        .icon(IconName::FolderOpen)
+                                        .label("Open Project...")
+                                        .disabled(self.busy)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.on_open_file(window, cx);
+                                        })),
+                                )
+                                .when(show_hints, |el| {
+                                    el.when_some(
+                                        shortcut_hint_badge(OPEN_PROJECT_KEYSTROKE),
+                                        |el, kbd| el.child(kbd),
+                                    )
+                                }),
+                        )
+                    })
+                    .when(in_settings, |row| {
+                        row.child(
+                            Button::new("topbar-back-converter")
+                                .primary()
+                                .icon(IconName::ArrowLeft)
+                                .label("Back to Converter")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.active_page = ActivePage::Converter;
+                                    window.focus(&this.focus_handle, cx);
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
-                        Button::new("topbar-demo")
-                            .label("Load Demo .prproj")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.on_load_demo(window, cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("topbar-settings")
+                                    .icon(IconName::Settings)
+                                    .label("Settings")
+                                    .selected(in_settings)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_settings(cx);
+                                        if this.active_page == ActivePage::Converter {
+                                            window.focus(&this.focus_handle, cx);
+                                        }
+                                    })),
+                            )
+                            .when(show_hints && !in_settings, |el| {
+                                el.when_some(
+                                    shortcut_hint_badge(SETTINGS_KEYSTROKE),
+                                    |el, kbd| el.child(kbd),
+                                )
+                            }),
                     )
                     .child(
-                        Button::new("topbar-open")
-                            .primary()
-                            .label("Open Project...")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.on_open_file(window, cx);
-                            })),
+                        Button::new("topbar-about")
+                            .icon(IconName::Info)
+                            .tooltip("About Aagedal NLE Project Converter")
+                            .on_click(|_, _, cx| {
+                                open_about_window(cx);
+                            }),
                     ),
             )
     }
@@ -934,19 +1326,7 @@ impl ConverterApp {
                         h_flex()
                             .gap(px(8.))
                             .when(!rep.messages.is_empty(), |row| {
-                                let log_text = rep
-                                    .messages
-                                    .iter()
-                                    .map(|m| {
-                                        let prefix = match (&m.sequence, &m.clip) {
-                                            (Some(s), Some(c)) => format!("[{s} · {c}] "),
-                                            (Some(s), None) => format!("[{s}] "),
-                                            _ => String::new(),
-                                        };
-                                        format!("[{:?}] {}{} ({})", m.severity, prefix, m.message, m.code)
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                                let log_text = format_conversion_log(rep);
                                 row.child(
                                     Button::new("report-copy-log")
                                         .small()
@@ -1126,13 +1506,24 @@ impl ConverterApp {
                     )
                     .child(div().w(px(270.)).child(Select::new(&self.target_select)))
                     .child(
-                        Button::new("convert-btn")
-                            .primary()
-                            .label(convert_label)
-                            .disabled(self.busy || self.selected_seq_ids.is_empty())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.on_convert(window, cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("convert-btn")
+                                    .primary()
+                                    .label(convert_label)
+                                    .disabled(self.busy || self.selected_seq_ids.is_empty())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.on_convert(window, cx);
+                                    })),
+                            )
+                            .when(self.current_settings(cx).show_shortcut_hints, |el| {
+                                el.when_some(
+                                    shortcut_hint_badge(CONVERT_KEYSTROKE),
+                                    |el, kbd| el.child(kbd),
+                                )
+                            }),
                     ),
             );
 
@@ -1779,16 +2170,76 @@ impl Render for ConverterApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let banners = self.render_banners(cx);
 
-        let main_body: AnyElement = match &self.loaded {
-            None => self.render_hero(cx).into_any_element(),
-            Some(loaded) => self.render_workspace(loaded, cx).into_any_element(),
+        let main_body: AnyElement = match self.active_page {
+            ActivePage::Settings => self.settings_view.clone().into_any_element(),
+            ActivePage::Converter => match &self.loaded {
+                None => self.render_hero(cx).into_any_element(),
+                Some(loaded) => self.render_workspace(loaded, cx).into_any_element(),
+            },
         };
 
         v_flex()
             .id("app-shell")
+            .track_focus(&self.focus_handle)
             .size_full()
             .bg(rgb(theme::BG))
             .text_color(rgb(theme::TEXT))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.toggle_settings(cx);
+                if this.active_page == ActivePage::Converter {
+                    window.focus(&this.focus_handle, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenShortcuts, _, cx| {
+                this.open_settings_section(SettingsSection::Shortcuts, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
+                this.on_open_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LoadDemoProject, window, cx| {
+                this.on_load_demo(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertProject, window, cx| {
+                this.on_convert(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseProject, _, cx| {
+                this.trigger_close_project(cx);
+            }))
+            .on_action(cx.listener(|this, _: &LoadEffectPreset, window, cx| {
+                this.trigger_load_preset(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveEffectPreset, window, cx| {
+                this.trigger_save_preset(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllSequences, window, cx| {
+                this.trigger_select_all_sequences(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeselectAllSequences, window, cx| {
+                this.trigger_deselect_all_sequences(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ApplyRecommendedEffects, window, cx| {
+                this.trigger_apply_recommended_effects(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RevealOutput, _, cx| {
+                this.trigger_reveal_output(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyConversionLog, _, cx| {
+                this.trigger_copy_conversion_log(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DismissOverlay, window, cx| {
+                if this.active_page == ActivePage::Settings {
+                    this.active_page = ActivePage::Converter;
+                    window.focus(&this.focus_handle, cx);
+                    cx.notify();
+                } else if this.error_msg.is_some() || this.status_toast.is_some() {
+                    this.error_msg = None;
+                    this.status_toast = None;
+                    cx.notify();
+                }
+            }))
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(first) = paths.paths().first() {
                     this.open_project_path(first.clone(), window, cx);
@@ -1811,7 +2262,9 @@ impl Render for ConverterApp {
                             .pt(px(20.))
                             .pb(px(32.))
                             .gap(px(16.))
-                            .children(banners)
+                            .when(self.active_page == ActivePage::Converter, |col| {
+                                col.children(banners)
+                            })
                             .child(main_body),
                     ),
             )

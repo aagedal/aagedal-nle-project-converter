@@ -191,6 +191,37 @@ pub fn frames_to_timecode(total_frames: i64, fps: Rational) -> String {
     format!("{hours:02}{sep}{minutes:02}{sep}{seconds:02}{sep}{frames:02}")
 }
 
+/// Parse an SMPTE timecode string (`HH:MM:SS:FF` or drop-frame `HH;MM;SS;FF` / `HH:MM:SS;FF`)
+/// into an absolute frame count at `fps`.
+pub fn timecode_to_frames(tc: &str, fps: Rational) -> Option<i64> {
+    let trimmed = tc.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let is_drop = trimmed.contains(';');
+    let parts: Vec<i64> = trimmed
+        .split([':', ';'])
+        .map(|p| p.trim().parse::<i64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if parts.len() != 4 {
+        return None;
+    }
+    let (h, m, s, f) = (parts[0], parts[1], parts[2], parts[3]);
+    if h < 0 || m < 0 || s < 0 || f < 0 {
+        return None;
+    }
+    let display_fps = fps.timebase().max(1);
+    let total_minutes = h * 60 + m;
+    let raw_frames = ((h * 3600 + m * 60 + s) * display_fps) + f;
+    if is_drop && matches!(display_fps, 30 | 60) {
+        let drop_frames = if display_fps == 60 { 4 } else { 2 };
+        let dropped = drop_frames * (total_minutes - (total_minutes / 10));
+        Some((raw_frames - dropped).max(0))
+    } else {
+        Some(raw_frames.max(0))
+    }
+}
+
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = b;
@@ -222,6 +253,14 @@ mod tests {
         assert_eq!(frames_to_timecode(90_000, Rational::FPS_25), "01:00:00:00");
         assert_eq!(frames_to_timecode(25 * 62 + 13, Rational::FPS_25), "00:01:02:13");
         assert_eq!(frames_to_timecode(0, Rational::FPS_29_97), "00;00;00;00");
+
+        assert_eq!(timecode_to_frames("01:00:00:00", Rational::FPS_25), Some(90_000));
+        assert_eq!(timecode_to_frames("00:01:02:13", Rational::FPS_25), Some(25 * 62 + 13));
+        assert_eq!(timecode_to_frames("01:00:00:00", Rational::FPS_23_976), Some(86_400));
+        // Drop-frame 29.97 round-trip at 1 hour (107,892 frames)
+        let df_1h = frames_to_timecode(107_892, Rational::FPS_29_97);
+        assert_eq!(df_1h, "01;00;00;00");
+        assert_eq!(timecode_to_frames(&df_1h, Rational::FPS_29_97), Some(107_892));
     }
 
     #[test]

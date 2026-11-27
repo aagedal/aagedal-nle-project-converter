@@ -792,6 +792,8 @@ pub fn is_standard_native_transition(effect_id: &str, name: &str) -> bool {
         "exponential fade",
         "custom fade",
         "cross fade",
+        "smpte_dissolve",
+        "kgaudiotranscrossfade",
     ];
     STANDARD.iter().any(|s| id.contains(s) || nm.contains(s))
 }

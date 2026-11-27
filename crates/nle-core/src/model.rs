@@ -12,6 +12,8 @@ pub enum NleFormat {
     Kdenlive,
     Fcp7Xml,
     OpenTimelineIo,
+    Edl,
+    Aaf,
 }
 
 impl NleFormat {
@@ -23,6 +25,8 @@ impl NleFormat {
             Self::Kdenlive => "Kdenlive (.kdenlive)",
             Self::Fcp7Xml => "FCP7 XML (.xml)",
             Self::OpenTimelineIo => "OpenTimelineIO (.otio)",
+            Self::Edl => "CMX 3600 EDL (.edl)",
+            Self::Aaf => "AAF (.aaf)",
         }
     }
 
@@ -34,6 +38,8 @@ impl NleFormat {
             Self::Kdenlive => "Kdenlive",
             Self::Fcp7Xml => "FCP7 XML",
             Self::OpenTimelineIo => "OpenTimelineIO",
+            Self::Edl => "EDL",
+            Self::Aaf => "AAF",
         }
     }
 
@@ -45,6 +51,8 @@ impl NleFormat {
             Self::Kdenlive => "kdenlive",
             Self::Fcp7Xml => "xml",
             Self::OpenTimelineIo => "otio",
+            Self::Edl => "edl",
+            Self::Aaf => "aaf",
         }
     }
 
@@ -55,7 +63,9 @@ impl NleFormat {
             "fcpxml" | "fcpxmld" | "fcpbundle" => Some(Self::FinalCutPro),
             "kdenlive" => Some(Self::Kdenlive),
             "xml" => Some(Self::Fcp7Xml),
-            "otio" => Some(Self::OpenTimelineIo),
+            "otio" | "otiod" | "otioz" => Some(Self::OpenTimelineIo),
+            "edl" => Some(Self::Edl),
+            "aaf" => Some(Self::Aaf),
             _ => None,
         }
     }

@@ -694,14 +694,30 @@ impl ConverterApp {
                 .set_title("Open NLE Project File")
                 .add_filter(
                     "NLE Projects",
-                    &["prproj", "drp", "drt", "fcpbundle", "fcpxml", "fcpxmld"],
+                    &[
+                        "prproj",
+                        "drp",
+                        "drt",
+                        "fcpbundle",
+                        "fcpxml",
+                        "fcpxmld",
+                        "otio",
+                        "otioz",
+                        "xml",
+                        "edl",
+                        "aaf",
+                    ],
                 )
                 .add_filter("Premiere Pro Project", &["prproj"])
                 .add_filter("DaVinci Resolve Project", &["drp", "drt"])
                 .add_filter(
                     "Final Cut Pro Library / XML",
                     &["fcpbundle", "fcpxml", "fcpxmld"],
-                );
+                )
+                .add_filter("OpenTimelineIO", &["otio", "otioz"])
+                .add_filter("FCP7 XML (XMEML)", &["xml"])
+                .add_filter("CMX 3600 EDL", &["edl"])
+                .add_filter("AAF (Advanced Authoring Format)", &["aaf"]);
             if let Some(dir) = last_dir {
                 dialog = dialog.set_directory(dir);
             }
@@ -744,7 +760,7 @@ impl ConverterApp {
             return;
         }
         self.busy = true;
-        self.busy_label = Some("Opening FCP bundle...".into());
+        self.busy_label = Some("Opening project bundle...".into());
         self.error_msg = None;
         let requested_target = self.target_format;
         let last_dir = self.current_settings(cx).last_dir_path();
@@ -752,7 +768,7 @@ impl ConverterApp {
 
         cx.spawn_in(window, async move |this, cx| {
             let mut dialog = rfd::AsyncFileDialog::new()
-                .set_title("Open Final Cut Pro Bundle (.fcpbundle or .fcpxmld)");
+                .set_title("Open Project Bundle (.fcpbundle, .fcpxmld, or .otiod)");
             if let Some(dir) = last_dir {
                 dialog = dialog.set_directory(dir);
             }
@@ -1275,7 +1291,7 @@ impl ConverterApp {
                             .text_color(rgb(theme::MUTED))
                             .text_center()
                             .child(
-                                "Read native Adobe Premiere Pro (.prproj), DaVinci Resolve (.drp), and Final Cut Pro (.fcpbundle / .fcpxml / .fcpxmld) projects directly in Rust, review app-exclusive effects interactively, and export ready-to-open projects. Drop a file here or open one below.",
+                                "Read Adobe Premiere Pro (.prproj), DaVinci Resolve (.drp/.drt), Final Cut Pro (.fcpbundle/.fcpxml/.fcpxmld), OpenTimelineIO (.otio/.otiod/.otioz), FCP7 XML (.xml), CMX 3600 EDL (.edl), and AAF (.aaf) directly in Rust, review effects interactively, and export ready-to-open projects. Drop a file here or open one below.",
                             ),
                     )
                     .child(
@@ -1288,7 +1304,7 @@ impl ConverterApp {
                             .child(
                                 Button::new("hero-open")
                                     .primary()
-                                    .label("Choose .prproj, .drp, or FCP File")
+                                    .label("Open Project File...")
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.on_open_file(window, cx);
@@ -1296,7 +1312,7 @@ impl ConverterApp {
                             )
                             .child(
                                 Button::new("hero-open-bundle")
-                                    .label("Open .fcpbundle / .fcpxmld")
+                                    .label("Open .fcpbundle / .fcpxmld / .otiod")
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.on_open_folder(window, cx);
@@ -1321,7 +1337,7 @@ impl ConverterApp {
                                 PillTone::Purple,
                             ))
                             .child(theme::pill(
-                                "Final Cut Pro .fcpbundle / .fcpxml ↔ Resolve / Premiere",
+                                "FCP ↔ OTIO / FCP7 XML / EDL / AAF",
                                 PillTone::Cyan,
                             ))
                             .child(theme::pill(
@@ -2078,22 +2094,27 @@ impl ConverterApp {
             v_flex().w_full().gap(px(10.)).children(cards).into_any_element()
         };
 
-        let cross_plugins = InstalledPluginRegistry::system().grouped_plugins(2);
-        let installed_plugin_banner = if cross_plugins.is_empty() {
-            None
-        } else {
-            let names: Vec<&str> = cross_plugins.iter().take(4).map(|p| p.name.as_str()).collect();
-            let more = if cross_plugins.len() > 4 {
-                format!(" +{} more", cross_plugins.len() - 4)
-            } else {
-                String::new()
-            };
-            Some(format!(
-                "Cross-NLE third-party plugins detected on this machine ({}): {}{more}",
-                cross_plugins.len(),
-                names.join(", ")
-            ))
-        };
+        let installed_plugin_banner = self
+            .cross_plugins
+            .as_deref()
+            .filter(|plugins| !plugins.is_empty())
+            .map(|cross_plugins| {
+                let names: Vec<&str> = cross_plugins
+                    .iter()
+                    .take(4)
+                    .map(|p| p.name.as_str())
+                    .collect();
+                let more = if cross_plugins.len() > 4 {
+                    format!(" +{} more", cross_plugins.len() - 4)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "Cross-NLE third-party plugins detected on this machine ({}): {}{more}",
+                    cross_plugins.len(),
+                    names.join(", ")
+                )
+            });
 
         let right_column = v_flex()
             .flex_1()

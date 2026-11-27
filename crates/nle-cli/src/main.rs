@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "nle-convert",
     version,
-    about = "Direct open-source NLE project converter (Premiere Pro ↔ DaVinci Resolve, Final Cut Pro, OTIO, FCP7 XML)"
+    about = "Direct open-source NLE project converter (Premiere Pro ↔ DaVinci Resolve, Final Cut Pro, OTIO, FCP7 XML, EDL, AAF)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inspect a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle project and list sequences, media, and detected effects
+    /// Inspect a .prproj, .drp/.drt, .fcpxml/.fcpxmld, .fcpbundle, .otio/.otiod/.otioz, .xml, .edl, or .aaf project
     Inspect {
         input: PathBuf,
         #[arg(long, default_value = "drp")]
@@ -34,7 +34,7 @@ enum Commands {
         #[arg(long)]
         save_preset: Option<PathBuf>,
     },
-    /// Convert a .prproj, .drp, .fcpxml/.fcpxmld, or .fcpbundle directly to .prproj, .drp, .fcpxml, .otio, or .xml
+    /// Convert a .prproj, .drp/.drt, .fcpxml/.fcpxmld, .fcpbundle, .otio/.otiod/.otioz, .xml, .edl, or .aaf directly to .prproj, .drp, .fcpxml, .otio, .xml, .edl, or .aaf
     Convert {
         input: PathBuf,
         #[arg(short, long)]
@@ -102,8 +102,12 @@ fn load_project(path: &Path) -> Result<Project, Box<dyn std::error::Error>> {
         "drp" | "drt" => Ok(nle_resolve::read_drp_file(path)?),
         "fcpxml" | "fcpxmld" => Ok(nle_interchange::read_fcpxml_file(path)?),
         "fcpbundle" => Ok(nle_interchange::read_fcpbundle_file(path)?),
+        "otio" | "otiod" | "otioz" => Ok(nle_interchange::read_otio_file(path)?),
+        "xml" => Ok(nle_interchange::read_xml_interchange_file(path)?),
+        "edl" => Ok(nle_interchange::read_edl_file(path)?),
+        "aaf" => Ok(nle_interchange::read_aaf_file(path)?),
         _ => Err(format!(
-            "Unsupported input format '.{ext}'. Supported: .prproj, .drp, .drt, .fcpxml, .fcpxmld, .fcpbundle"
+            "Unsupported input format '.{ext}'. Supported: .prproj, .drp, .drt, .fcpxml, .fcpxmld, .fcpbundle, .otio, .otiod, .otioz, .xml, .edl, .aaf"
         )
         .into()),
     }
@@ -167,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let inspection = ProjectInspection::from_project(&project);
             let target_fmt = NleFormat::from_extension(&target).ok_or_else(|| {
                 format!(
-                    "Unsupported target format '{target}'. Supported: drp, prproj, fcpxml, otio, xml"
+                    "Unsupported target format '{target}'. Supported: drp, prproj, fcpxml, otio, xml, edl, aaf"
                 )
             })?;
             let plan = analyze_project_effects(&project, &[], target_fmt);
@@ -277,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or("");
             let target_fmt = NleFormat::from_extension(out_ext).ok_or_else(|| {
                 format!(
-                    "Unsupported output extension '.{out_ext}'. Supported: .drp, .prproj, .fcpxml, .otio, .xml"
+                    "Unsupported output extension '.{out_ext}'. Supported: .drp, .prproj, .fcpxml, .otio, .xml, .edl, .aaf"
                 )
             })?;
 
@@ -356,6 +360,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 NleFormat::FinalCutPro => nle_interchange::write_fcpxml_file(&project, &output, &options)?,
                 NleFormat::OpenTimelineIo => nle_interchange::write_otio_file(&project, &output, &options)?,
                 NleFormat::Fcp7Xml => nle_interchange::write_fcp7_xml_file(&project, &output, &options)?,
+                NleFormat::Edl => nle_interchange::write_edl_file(&project, &output, &options)?,
+                NleFormat::Aaf => nle_interchange::write_aaf_file(&project, &output, &options)?,
                 other => {
                     return Err(format!("Direct writing to {} is not implemented yet.", other.display_name()).into());
                 }

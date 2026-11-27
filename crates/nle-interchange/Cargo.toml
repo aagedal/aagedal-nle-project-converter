@@ -3,7 +3,7 @@ name = "nle-interchange"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Final Cut Pro FCPXML 1.8–1.13 / .fcpxmld reader & writer, OpenTimelineIO (.otio), and FCP7 XMEML v5 writers"
+description = "Final Cut Pro FCPXML 1.8–1.15 / .fcpxmld & .fcpbundle, OpenTimelineIO (.otio/.otiod/.otioz), FCP7 XMEML v4/v5, CMX 3600 EDL (.edl), and AAF (.aaf) readers & writers"
 
 [dependencies]
 nle-core.workspace = true
@@ -11,3 +11,4 @@ roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+zip.workspace = true

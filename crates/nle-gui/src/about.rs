@@ -225,6 +225,14 @@ impl Render for AboutWindow {
                                             .child(theme::pill(
                                                 "FCP7 XML (.xml)",
                                                 PillTone::Neutral,
+                                            ))
+                                            .child(theme::pill(
+                                                "CMX 3600 EDL (.edl)",
+                                                PillTone::Neutral,
+                                            ))
+                                            .child(theme::pill(
+                                                "AAF (.aaf)",
+                                                PillTone::Neutral,
                                             )),
                                     ),
                             )

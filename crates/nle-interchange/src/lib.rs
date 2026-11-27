@@ -1,14 +1,47 @@
+pub mod aaf;
+pub mod edl;
 pub mod fcp7xml;
 pub mod fcpbundle;
 pub mod fcpxml;
 pub mod otio;
 
-pub use fcp7xml::{write_fcp7_xml_file, Fcp7XmlWriter};
+pub use aaf::{parse_aaf_bytes, read_aaf_file, write_aaf_file, AafReader, AafWriter};
+pub use edl::{parse_edl_str, read_edl_file, write_edl_file, EdlReader, EdlWriter};
+pub use fcp7xml::{
+    parse_fcp7_xml_str, read_fcp7_xml_file, write_fcp7_xml_file, Fcp7XmlReader, Fcp7XmlWriter,
+};
 pub use fcpbundle::{read_fcpbundle_file, FcpBundleReader};
 pub use fcpxml::{
     parse_fcpxml_str, read_fcpxml_file, write_fcpxml_file, FcpXmlReader, FcpXmlWriter,
 };
-pub use otio::{write_otio_file, OtioWriter};
+pub use otio::{parse_otio_str, read_otio_file, write_otio_file, OtioReader, OtioWriter};
+
+/// Read an `.xml` interchange file, auto-detecting FCP7 XMEML (`<xmeml>`) vs. Final Cut Pro XML (`<fcpxml>`).
+pub fn read_xml_interchange_file(path: &std::path::Path) -> nle_core::NleResult<nle_core::Project> {
+    let raw = std::fs::read_to_string(path)?;
+    let default_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("XML Project");
+    let opts = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(&raw, opts)
+        .map_err(|e| nle_core::NleError::Xml(format!("Invalid XML document: {e}")))?;
+    let mut project = match doc.root_element().tag_name().name() {
+        "xmeml" => parse_fcp7_xml_str(&raw, default_name)?,
+        "fcpxml" => parse_fcpxml_str(&raw, default_name)?,
+        other => {
+            return Err(nle_core::NleError::InvalidFormat(format!(
+                "Unsupported XML root element <{other}>. Expected <xmeml> (FCP7 XML) or <fcpxml> (Final Cut Pro XML)."
+            )));
+        }
+    };
+    project.source_path = Some(path.to_string_lossy().into_owned());
+    Ok(project)
+}
 
 #[cfg(test)]
 mod tests {

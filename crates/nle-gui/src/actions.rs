@@ -59,13 +59,13 @@ pub const SHORTCUT_CATALOG: &[ShortcutEntry] = &[
     ShortcutEntry {
         category: "File & Project",
         label: "Open Project",
-        description: "Open a .prproj, .drp, .drt, .fcpbundle, or .fcpxml file",
+        description: "Open a .prproj, .drp/.drt, .fcpbundle/.fcpxml, .otio/.otioz, .xml, .edl, or .aaf file",
         keystroke: primary_key!("o"),
     },
     ShortcutEntry {
         category: "File & Project",
-        label: "Open FCP Bundle / Folder",
-        description: "Select a .fcpbundle or .fcpxmld package folder directly",
+        label: "Open Project Bundle / Folder",
+        description: "Select a .fcpbundle, .fcpxmld, or .otiod package folder directly",
         keystroke: primary_key!("shift-o"),
     },
     ShortcutEntry {
@@ -242,7 +242,7 @@ pub fn build_app_menus() -> Vec<Menu> {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open Project...", OpenProject),
-                MenuItem::action("Open FCP Bundle / Folder...", OpenProjectFolder),
+                MenuItem::action("Open Project Bundle / Folder...", OpenProjectFolder),
                 MenuItem::action("Load Demo Project", LoadDemoProject),
                 MenuItem::separator(),
                 MenuItem::action("Convert & Save...", ConvertProject),

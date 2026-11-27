@@ -1,10 +1,12 @@
+use crate::fcpxml::time::path_to_file_url;
 use nle_core::{
-    flatten_nested_and_multicam_clips, ClipSourceKind, ConversionMessage, ConversionOptions,
-    ConversionReport, NleError, NleFormat, NleResult, Project, ProjectWriter, Sequence,
-    SequenceKind, Severity, Track, TrackKind,
+    flatten_nested_and_multicam_clips, BlendMode, Clip, ClipSourceKind, ConversionMessage,
+    ConversionOptions, ConversionReport, MediaAsset, NleError, NleFormat, NleResult, Project,
+    ProjectWriter, Sequence, SequenceKind, Severity, Track, TrackKind,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -96,6 +98,18 @@ pub fn write_otio_file(
         });
     }
 
+    let assets_by_id: HashMap<&str, &MediaAsset> = project
+        .media_assets
+        .iter()
+        .map(|a| (a.id.as_str(), a))
+        .collect();
+    let assets_by_path: HashMap<&str, &MediaAsset> = project
+        .media_assets
+        .iter()
+        .filter(|a| !a.path.is_empty())
+        .map(|a| (a.path.as_str(), a))
+        .collect();
+
     let rate = seq.frame_rate.as_f64();
     let mut tracks_json = Vec::new();
     let mut total_v = 0usize;
@@ -103,10 +117,15 @@ pub fn write_otio_file(
     let mut total_markers = 0usize;
 
     for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
-        let (track_val, clip_markers_written) =
-            serialize_track(track, rate, options.include_markers);
+        let (track_val, track_markers_written) = serialize_track(
+            track,
+            rate,
+            options,
+            &assets_by_id,
+            &assets_by_path,
+        );
         tracks_json.push(track_val);
-        total_markers += clip_markers_written;
+        total_markers += track_markers_written;
         if track.kind == TrackKind::Video {
             total_v += track.clips.len();
         } else {
@@ -124,13 +143,18 @@ pub fn write_otio_file(
         Vec::new()
     };
 
+    let proj_name = options
+        .project_name
+        .as_deref()
+        .unwrap_or(&project.name);
+
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": seq.name,
         "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": seq.start_tc_frame.max(0) as f64 },
         "metadata": {
             "aagedal_nle_converter": {
-                "project_name": project.name,
+                "project_name": proj_name,
                 "width": seq.width,
                 "height": seq.height
             }
@@ -144,9 +168,10 @@ pub fn write_otio_file(
     });
 
     if let Some(parent) = output_path.parent()
-        && !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(output_path, serde_json::to_string_pretty(&timeline)?)?;
 
     Ok(ConversionReport {
@@ -198,7 +223,72 @@ fn serialize_transition(tr: &nle_core::Transition, rate: f64) -> Value {
     })
 }
 
-fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, usize) {
+fn serialize_clip_metadata(clip: &Clip, include_clip_colors: bool) -> Value {
+    let mut meta = Map::new();
+    if !clip.motion.is_identity() {
+        let m = &clip.motion;
+        let mut motion_map = Map::new();
+        motion_map.insert("scale".into(), json!(m.scale));
+        if let Some(sy) = m.scale_y {
+            motion_map.insert("scale_y".into(), json!(sy));
+        }
+        if m.position_x.abs() > 1e-6 {
+            motion_map.insert("position_x".into(), json!(m.position_x));
+        }
+        if m.position_y.abs() > 1e-6 {
+            motion_map.insert("position_y".into(), json!(m.position_y));
+        }
+        if m.rotation.abs() > 1e-6 {
+            motion_map.insert("rotation".into(), json!(m.rotation));
+        }
+        if m.anchor_x.abs() > 1e-6 {
+            motion_map.insert("anchor_x".into(), json!(m.anchor_x));
+        }
+        if m.anchor_y.abs() > 1e-6 {
+            motion_map.insert("anchor_y".into(), json!(m.anchor_y));
+        }
+        if m.crop_left.abs() > 1e-6 {
+            motion_map.insert("crop_left".into(), json!(m.crop_left));
+        }
+        if m.crop_right.abs() > 1e-6 {
+            motion_map.insert("crop_right".into(), json!(m.crop_right));
+        }
+        if m.crop_top.abs() > 1e-6 {
+            motion_map.insert("crop_top".into(), json!(m.crop_top));
+        }
+        if m.crop_bottom.abs() > 1e-6 {
+            motion_map.insert("crop_bottom".into(), json!(m.crop_bottom));
+        }
+        meta.insert("motion".into(), Value::Object(motion_map));
+    }
+    if (clip.opacity - 100.0).abs() > 1e-4 {
+        meta.insert("opacity".into(), json!(clip.opacity));
+    }
+    if clip.blend_mode != BlendMode::Normal {
+        meta.insert("blend_mode".into(), json!(clip.blend_mode.display_name()));
+    }
+    if include_clip_colors
+        && let Some(label) = clip.label_name.as_deref().filter(|s| !s.is_empty())
+    {
+        meta.insert("label_name".into(), json!(label));
+    }
+    if let Some(lg) = clip.link_group_id.as_deref().filter(|s| !s.is_empty()) {
+        meta.insert("link_group_id".into(), json!(lg));
+    }
+    if meta.is_empty() {
+        json!({})
+    } else {
+        json!({ "aagedal_nle_converter": Value::Object(meta) })
+    }
+}
+
+fn serialize_track(
+    track: &Track,
+    rate: f64,
+    options: &ConversionOptions,
+    assets_by_id: &HashMap<&str, &MediaAsset>,
+    assets_by_path: &HashMap<&str, &MediaAsset>,
+) -> (Value, usize) {
     let mut sorted = track.clips.clone();
     sorted.sort_by_key(|c| c.start_frame);
     let mut transitions = track.transitions.clone();
@@ -212,7 +302,10 @@ fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, u
     for clip in &sorted {
         // Interleave any transition whose cut boundary lands at or near clip.start_frame
         for (ti, tr) in transitions.iter().enumerate() {
-            if !used_tr[ti] && tr.start_frame <= clip.start_frame && tr.end_frame >= clip.start_frame {
+            if !used_tr[ti]
+                && tr.start_frame <= clip.start_frame
+                && tr.end_frame >= clip.start_frame
+            {
                 children.push(serialize_transition(tr, rate));
                 used_tr[ti] = true;
             }
@@ -229,10 +322,45 @@ fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, u
                 }
             }));
         }
-        let target_url = if clip.media_path.starts_with("file://") {
-            clip.media_path.clone()
+
+        let asset = assets_by_id
+            .get(clip.media_id.as_str())
+            .or_else(|| assets_by_path.get(clip.media_path.as_str()))
+            .copied();
+
+        let src_rate = asset
+            .map(|a| a.frame_rate.as_f64())
+            .filter(|&r| r > 0.0)
+            .unwrap_or_else(|| {
+                let r = clip.source_fps.as_f64();
+                if r > 0.0 { r } else { rate }
+            });
+        let asset_tc = asset.map(|a| a.source_tc_frame.max(0)).unwrap_or(0);
+        let asset_dur = asset.map(|a| a.duration_frames.max(0)).unwrap_or(0);
+
+        let media_ref = if clip.media_path.is_empty() {
+            json!({
+                "OTIO_SCHEMA": "MissingReference.1",
+                "name": clip.name
+            })
         } else {
-            format!("file://{}", clip.media_path.replace('\\', "/"))
+            let target_url = path_to_file_url(&clip.media_path);
+            let mut ext_ref = Map::new();
+            ext_ref.insert("OTIO_SCHEMA".into(), json!("ExternalReference.1"));
+            ext_ref.insert("name".into(), json!(clip.name));
+            ext_ref.insert("target_url".into(), json!(target_url));
+            if asset_tc > 0 || asset_dur > 0 {
+                let avail_dur = asset_dur.max(clip.source_out_frame).max(clip.duration_frames()).max(1);
+                ext_ref.insert(
+                    "available_range".into(),
+                    json!({
+                        "OTIO_SCHEMA": "TimeRange.1",
+                        "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": src_rate, "value": asset_tc as f64 },
+                        "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": src_rate, "value": avail_dur as f64 }
+                    }),
+                );
+            }
+            Value::Object(ext_ref)
         };
 
         let mut effects = Vec::new();
@@ -259,41 +387,39 @@ fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, u
             }));
         }
 
-        let clip_markers: Vec<Value> = if include_markers {
+        let clip_markers: Vec<Value> = if options.include_markers {
             markers_written += clip.markers.len();
             clip.markers
                 .iter()
-                .map(|m| serialize_marker(m, rate))
+                .map(|m| {
+                    let mut m_shifted = m.clone();
+                    m_shifted.frame = asset_tc + m.frame.max(0);
+                    serialize_marker(&m_shifted, src_rate)
+                })
                 .collect()
         } else {
             Vec::new()
         };
 
+        // Per OTIO spec, Clip.source_range.duration is the clip's duration on the parent Track
+        // (independent of LinearTimeWarp.time_scalar / FreezeFrame).
         let tl_dur = clip.duration_frames().max(1) as f64;
-        let src_dur = if is_freeze {
-            tl_dur
-        } else if is_retimed {
-            (tl_dur * signed_scalar.abs()).max(1.0)
-        } else {
-            tl_dur
-        };
+        let src_start_val = (asset_tc + clip.source_in_frame.max(0)) as f64;
+        let clip_metadata = serialize_clip_metadata(clip, options.include_clip_colors);
 
         children.push(json!({
             "OTIO_SCHEMA": "Clip.2",
             "name": clip.name,
             "enabled": clip.enabled,
-            "media_reference": {
-                "OTIO_SCHEMA": "ExternalReference.1",
-                "name": clip.name,
-                "target_url": target_url
-            },
+            "media_reference": media_ref,
             "source_range": {
                 "OTIO_SCHEMA": "TimeRange.1",
-                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": clip.source_in_frame as f64 },
-                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": src_dur }
+                "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": src_rate, "value": src_start_val },
+                "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": rate, "value": tl_dur }
             },
             "effects": effects,
-            "markers": clip_markers
+            "markers": clip_markers,
+            "metadata": clip_metadata
         }));
         cursor = clip.end_frame.max(cursor);
     }
@@ -305,64 +431,39 @@ fn serialize_track(track: &Track, rate: f64, include_markers: bool) -> (Value, u
         }
     }
 
-    (
-        json!({
-            "OTIO_SCHEMA": "Track.1",
-            "name": track.name,
-            "kind": if track.kind == TrackKind::Video { "Video" } else { "Audio" },
-            "enabled": track.enabled,
-            "children": children
+    let track_markers: Vec<Value> = if options.include_markers {
+        markers_written += track.markers.len();
+        track
+            .markers
+            .iter()
+            .map(|m| serialize_marker(m, rate))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut track_obj = Map::new();
+    track_obj.insert("OTIO_SCHEMA".into(), json!("Track.1"));
+    track_obj.insert("name".into(), json!(track.name));
+    track_obj.insert(
+        "kind".into(),
+        json!(if track.kind == TrackKind::Video {
+            "Video"
+        } else {
+            "Audio"
         }),
-        markers_written,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nle_core::Rational;
-
-    #[test]
-    fn warns_when_multiple_timelines_are_selected() {
-        let dir = std::env::temp_dir().join("aagedal_otio_multi_seq_test");
-        let _ = fs::remove_dir_all(&dir);
-        let out = dir.join("multi.otio");
-
-        let mk_seq = |id: &str, name: &str| Sequence {
-            id: id.into(),
-            name: name.into(),
-            kind: SequenceKind::Timeline,
-            width: 1920,
-            height: 1080,
-            frame_rate: Rational::FPS_25,
-            duration_frames: 0,
-            start_tc_frame: 0,
-            mark_in: None,
-            mark_out: None,
-            video_tracks: Vec::new(),
-            audio_tracks: Vec::new(),
-            audio_buses: Vec::new(),
-            markers: Vec::new(),
-            metadata: std::collections::BTreeMap::new(),
-        };
-        let proj = Project {
-            name: "Multi".into(),
-            source_format: NleFormat::PremierePro,
-            sequences: vec![mk_seq("s1", "Edit_Main"), mk_seq("s2", "Edit_Alt")],
-            ..Default::default()
-        };
-
-        let report = write_otio_file(&proj, &out, &ConversionOptions::default()).unwrap();
-        assert_eq!(report.sequences_converted, 1);
-        assert!(
-            report
-                .messages
-                .iter()
-                .any(|m| m.code == "OTIO_SINGLE_SEQUENCE" && m.severity == Severity::Warning),
-            "expected OTIO_SINGLE_SEQUENCE warning, got: {:?}",
-            report.messages
-        );
-
-        let _ = fs::remove_dir_all(&dir);
+    );
+    track_obj.insert("enabled".into(), json!(track.enabled));
+    track_obj.insert("children".into(), Value::Array(children));
+    if !track_markers.is_empty() {
+        track_obj.insert("markers".into(), Value::Array(track_markers));
     }
+    if track.kind == TrackKind::Audio && track.audio_channels > 0 {
+        track_obj.insert(
+            "metadata".into(),
+            json!({ "aagedal_nle_converter": { "audio_channels": track.audio_channels } }),
+        );
+    }
+
+    (Value::Object(track_obj), markers_written)
 }

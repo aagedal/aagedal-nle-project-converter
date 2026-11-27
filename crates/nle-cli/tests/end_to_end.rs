@@ -791,3 +791,408 @@ fn roundtrips_fades_transitions_opacity_and_blend_modes_across_all_three_nles() 
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn otio_and_fcp7_xml_read_and_convert_to_resolve_and_premiere() {
+    use nle_core::{BlendMode, ClipSourceKind};
+
+    let dir = std::env::temp_dir().join("aagedal_nle_otio_fcp7_read_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    // 1. Read OpenTimelineIO (.otio) with media_references, Gap, Transition, LinearTimeWarp, Marker, Effect
+    let otio_in = dir.join("editorial.otio");
+    let otio_json = r#"{
+      "OTIO_SCHEMA": "Timeline.1",
+      "name": "OTIO_Edit",
+      "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 90000.0 },
+      "metadata": { "aagedal_nle_converter": { "width": 1920, "height": 1080 } },
+      "tracks": {
+        "OTIO_SCHEMA": "Stack.1",
+        "name": "tracks",
+        "markers": [
+          {
+            "OTIO_SCHEMA": "Marker.2",
+            "name": "VFX Note",
+            "color": "CYAN",
+            "comment": "Check wire removal",
+            "marked_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 50.0 },
+              "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 5.0 }
+            }
+          }
+        ],
+        "children": [
+          {
+            "OTIO_SCHEMA": "Track.1",
+            "name": "V1",
+            "kind": "Video",
+            "children": [
+              {
+                "OTIO_SCHEMA": "Clip.2",
+                "name": "Hero_A.mov",
+                "active_media_reference_key": "DEFAULT_MEDIA",
+                "media_references": {
+                  "DEFAULT_MEDIA": {
+                    "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": "file:///Media/Hero_A.mov",
+                    "available_range": {
+                      "OTIO_SCHEMA": "TimeRange.1",
+                      "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 90000.0 },
+                      "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 500.0 }
+                    }
+                  }
+                },
+                "source_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 90025.0 },
+                  "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 100.0 }
+                },
+                "effects": [
+                  {
+                    "OTIO_SCHEMA": "LinearTimeWarp.1",
+                    "name": "LinearTimeWarp",
+                    "effect_name": "LinearTimeWarp",
+                    "time_scalar": 0.5
+                  },
+                  {
+                    "OTIO_SCHEMA": "Effect.1",
+                    "name": "Gaussian Blur",
+                    "effect_name": "Gaussian Blur",
+                    "metadata": { "radius": 12 }
+                  }
+                ]
+              },
+              {
+                "OTIO_SCHEMA": "Transition.1",
+                "name": "Cross Dissolve",
+                "transition_type": "SMPTE_Dissolve",
+                "in_offset": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 10.0 },
+                "out_offset": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 10.0 }
+              },
+              {
+                "OTIO_SCHEMA": "Clip.2",
+                "name": "Hero_B.mov",
+                "media_reference": {
+                  "OTIO_SCHEMA": "ExternalReference.1",
+                  "target_url": "file:///Media/Hero_B.mov"
+                },
+                "source_range": {
+                  "OTIO_SCHEMA": "TimeRange.1",
+                  "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 0.0 },
+                  "duration": { "OTIO_SCHEMA": "RationalTime.1", "rate": 25.0, "value": 75.0 }
+                },
+                "effects": [
+                  {
+                    "OTIO_SCHEMA": "LinearTimeWarp.1",
+                    "name": "LinearTimeWarp",
+                    "effect_name": "LinearTimeWarp",
+                    "time_scalar": -1.0
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }"#;
+    std::fs::write(&otio_in, otio_json).expect("write otio input");
+
+    let mut otio_proj = nle_interchange::read_otio_file(&otio_in).expect("read .otio");
+    assert_eq!(otio_proj.source_format, NleFormat::OpenTimelineIo);
+    let otio_plan = analyze_project_effects(&otio_proj, &[], NleFormat::DaVinciResolve);
+    // Gaussian Blur should be detected with a Resolve equivalent, while SMPTE_Dissolve is standard native!
+    assert_eq!(otio_plan.needs_user_review_count, 1);
+    assert_eq!(otio_plan.unmapped_count, 0);
+    apply_effect_decisions(&mut otio_proj, &otio_plan, &UserEffectDecisions::default(), true);
+
+    // Convert OTIO -> Resolve .drp and re-read
+    let drp_from_otio = dir.join("from_otio.drp");
+    let drp_rep = nle_resolve::write_drp_file(
+        &otio_proj,
+        &drp_from_otio,
+        &ConversionOptions::default(),
+    )
+    .expect("OTIO -> .drp");
+    assert_eq!(drp_rep.sequences_converted, 1);
+    assert_eq!(drp_rep.video_clips_converted, 2);
+
+    let drp_reread = nle_resolve::read_drp_file(&drp_from_otio).expect("re-read .drp");
+    let dseq = &drp_reread.sequences[0];
+    assert_eq!(dseq.start_tc_frame, 90_000);
+    assert_eq!(dseq.video_tracks[0].clips.len(), 2);
+    assert!((dseq.video_tracks[0].clips[0].speed_percent - 50.0).abs() < 0.5);
+    assert!(dseq.video_tracks[0].clips[1].reversed);
+    assert_eq!(dseq.video_tracks[0].transitions.len(), 1);
+    assert!(dseq.markers.iter().any(|m| m.name == "VFX Note"));
+
+    // Convert OTIO -> Premiere .prproj and re-read
+    let pr_from_otio = dir.join("from_otio.prproj");
+    nle_premiere::write_prproj_file(
+        &otio_proj,
+        &pr_from_otio,
+        &ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        },
+    )
+    .expect("OTIO -> .prproj");
+    let pr_reread = nle_premiere::read_prproj_file(&pr_from_otio).expect("re-read .prproj");
+    assert_eq!(pr_reread.sequences[0].video_tracks[0].clips.len(), 2);
+    assert_eq!(pr_reread.sequences[0].video_tracks[0].transitions.len(), 1);
+
+    // 2. Read FCP7 XML (.xml) with bins, -1 transition boundaries, Motion/Opacity/BlendMode, links, and nested seq
+    let fcp7_in = dir.join("premiere_export.xml");
+    let fcp7_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <project>
+    <name>Fcp7_E2E</name>
+    <children>
+      <bin>
+        <name>Footage</name>
+        <children>
+          <clip id="m-clip-1">
+            <name>ShotA.mov</name>
+            <file id="file-a">
+              <name>ShotA.mov</name>
+              <pathurl>file://localhost/Media/ShotA.mov</pathurl>
+              <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+              <duration>400</duration>
+              <timecode>
+                <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+                <string>01:00:00:00</string>
+                <frame>90000</frame>
+              </timecode>
+              <media>
+                <video><samplecharacteristics><width>1920</width><height>1080</height></samplecharacteristics></video>
+                <audio><samplecharacteristics><samplerate>48000</samplerate></samplecharacteristics><channelcount>2</channelcount></audio>
+              </media>
+            </file>
+          </clip>
+        </children>
+      </bin>
+      <sequence id="seq-main">
+        <name>FCP7_Main</name>
+        <duration>150</duration>
+        <rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+        <media>
+          <video>
+            <format><samplecharacteristics><width>1920</width><height>1080</height></samplecharacteristics></format>
+            <track>
+              <clipitem id="v-1">
+                <name>ShotA.mov</name>
+                <start>0</start><end>-1</end><in>10</in><out>85</out>
+                <compositemode>screen</compositemode>
+                <file id="file-a"/>
+                <link><linkclipref>v-1</linkclipref><mediatype>video</mediatype></link>
+                <link><linkclipref>a-1</linkclipref><mediatype>audio</mediatype></link>
+                <filter><effect><name>Basic Motion</name><effectid>basic</effectid><parameter><parameterid>scale</parameterid><value>115</value></parameter></effect></filter>
+                <filter><effect><name>Opacity</name><effectid>opacity</effectid><parameter><parameterid>opacity</parameterid><value>80</value></parameter></effect></filter>
+              </clipitem>
+              <transitionitem>
+                <start>65</start><end>85</end><alignment>center</alignment>
+                <effect><name>Cross Dissolve</name><effectid>Cross Dissolve</effectid></effect>
+              </transitionitem>
+              <clipitem id="v-2">
+                <name>ShotA_Part2</name>
+                <start>-1</start><end>150</end><in>85</in><out>160</out>
+                <file id="file-a"/>
+              </clipitem>
+            </track>
+          </video>
+          <audio>
+            <track>
+              <clipitem id="a-1">
+                <name>ShotA.mov</name>
+                <start>0</start><end>75</end><in>10</in><out>85</out>
+                <file id="file-a"/>
+                <sourcetrack><mediatype>audio</mediatype><trackindex>1</trackindex></sourcetrack>
+                <link><linkclipref>v-1</linkclipref><mediatype>video</mediatype></link>
+                <link><linkclipref>a-1</linkclipref><mediatype>audio</mediatype></link>
+              </clipitem>
+            </track>
+          </audio>
+        </media>
+      </sequence>
+    </children>
+  </project>
+</xmeml>"#;
+    std::fs::write(&fcp7_in, fcp7_xml).expect("write fcp7 xml");
+
+    let fcp7_proj = nle_interchange::read_xml_interchange_file(&fcp7_in).expect("read FCP7 .xml");
+    assert_eq!(fcp7_proj.source_format, NleFormat::Fcp7Xml);
+    assert_eq!(fcp7_proj.bins.len(), 1);
+    assert_eq!(fcp7_proj.sequences[0].video_tracks[0].clips[0].end_frame, 75);
+    assert_eq!(fcp7_proj.sequences[0].video_tracks[0].clips[1].start_frame, 75);
+    assert_eq!(fcp7_proj.sequences[0].video_tracks[0].clips[0].source_kind, ClipSourceKind::Media);
+
+    // Convert FCP7 XML -> Resolve .drp & re-read
+    let drp_from_fcp7 = dir.join("from_fcp7.drp");
+    let rep_drp = nle_resolve::write_drp_file(
+        &fcp7_proj,
+        &drp_from_fcp7,
+        &ConversionOptions::default(),
+    )
+    .expect("FCP7 XML -> .drp");
+    assert_eq!(rep_drp.bins_created, 1);
+    assert_eq!(rep_drp.video_clips_converted, 2);
+    assert_eq!(rep_drp.audio_clips_converted, 1);
+
+    let reread_drp_fcp7 = nle_resolve::read_drp_file(&drp_from_fcp7).expect("re-read .drp from fcp7");
+    let v0 = &reread_drp_fcp7.sequences[0].video_tracks[0].clips[0];
+    assert!((v0.motion.scale - 115.0).abs() < 0.2);
+    assert!((v0.opacity - 80.0).abs() < 0.2);
+    assert_eq!(v0.blend_mode, BlendMode::Screen);
+    assert_eq!(reread_drp_fcp7.sequences[0].video_tracks[0].transitions.len(), 1);
+
+    // Convert FCP7 XML -> Premiere .prproj & re-read
+    let pr_from_fcp7 = dir.join("from_fcp7.prproj");
+    nle_premiere::write_prproj_file(
+        &fcp7_proj,
+        &pr_from_fcp7,
+        &ConversionOptions {
+            target_format: NleFormat::PremierePro,
+            ..Default::default()
+        },
+    )
+    .expect("FCP7 XML -> .prproj");
+    let reread_pr_fcp7 = nle_premiere::read_prproj_file(&pr_from_fcp7).expect("re-read .prproj from fcp7");
+    let pv0 = &reread_pr_fcp7.sequences[0].video_tracks[0].clips[0];
+    assert!((pv0.motion.scale - 115.0).abs() < 0.2);
+    assert!((pv0.opacity - 80.0).abs() < 0.2);
+    assert_eq!(pv0.blend_mode, BlendMode::Screen);
+    assert!(pv0.link_group_id.is_some());
+    assert_eq!(
+        pv0.link_group_id,
+        reread_pr_fcp7.sequences[0].audio_tracks[0].clips[0].link_group_id
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn final_cut_pro_to_and_from_edl_and_aaf_pipeline() {
+    let dir = std::env::temp_dir().join("aagedal_nle_fcp_edl_aaf_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let fcpxml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.15">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="r2" name="A001_Scene1.mov" uid="UID-1" start="3600s" duration="500/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Volumes/RAID/A001_Scene1.mov"/>
+    </asset>
+    <asset id="r3" name="B002_Scene2.mov" uid="UID-2" start="0s" duration="400/25s" hasVideo="1" format="r1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Volumes/RAID/B002_Scene2.mov"/>
+    </asset>
+    <asset id="r4" name="Score.wav" uid="UID-3" start="0s" duration="400/25s" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="file:///Volumes/RAID/Score.wav"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="Reel 1">
+      <project name="FCP_Handoff">
+        <sequence format="r1" duration="200/25s" tcStart="3600s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <asset-clip ref="r2" offset="3600s" name="A001_Scene1.mov" start="3601s" duration="100/25s">
+              <marker start="3602s" duration="1/25s" value="Audio Check" note="Boom shadow"/>
+            </asset-clip>
+            <transition name="Cross Dissolve" offset="3603.6s" duration="20/25s"/>
+            <asset-clip ref="r3" offset="3604s" name="B002_Scene2.mov" start="0s" duration="100/25s">
+              <asset-clip ref="r4" lane="-1" offset="0s" name="Score.wav" start="0s" duration="100/25s"/>
+            </asset-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+    let fcp_in = dir.join("fcp_handoff.fcpxml");
+    std::fs::write(&fcp_in, fcpxml).expect("write fcpxml");
+    let fcp_proj = nle_interchange::read_fcpxml_file(&fcp_in).expect("read fcpxml");
+
+    // 1. Final Cut Pro -> CMX 3600 EDL -> Final Cut Pro (.fcpxml)
+    let edl_out = dir.join("handoff.edl");
+    let edl_rep = nle_interchange::write_edl_file(
+        &fcp_proj,
+        &edl_out,
+        &ConversionOptions {
+            target_format: NleFormat::Edl,
+            ..Default::default()
+        },
+    )
+    .expect("FCP -> .edl");
+    assert_eq!(edl_rep.sequences_converted, 1);
+    assert_eq!(edl_rep.video_clips_converted, 2);
+
+    let from_edl = nle_interchange::read_edl_file(&edl_out).expect("read .edl");
+    assert_eq!(from_edl.source_format, NleFormat::Edl);
+    assert_eq!(from_edl.sequences[0].video_tracks[0].clips.len(), 2);
+    assert_eq!(from_edl.sequences[0].video_tracks[0].transitions.len(), 1);
+    assert_eq!(from_edl.sequences[0].markers.len(), 1);
+
+    let fcp_from_edl = dir.join("from_edl.fcpxml");
+    nle_interchange::write_fcpxml_file(
+        &from_edl,
+        &fcp_from_edl,
+        &ConversionOptions {
+            target_format: NleFormat::FinalCutPro,
+            ..Default::default()
+        },
+    )
+    .expect("EDL -> .fcpxml");
+    let reread_fcp_edl = nle_interchange::read_fcpxml_file(&fcp_from_edl).expect("re-read .fcpxml");
+    assert_eq!(reread_fcp_edl.sequences[0].video_tracks[0].clips.len(), 2);
+    assert_eq!(
+        reread_fcp_edl.sequences[0].video_tracks[0].clips[0].media_path,
+        "/Volumes/RAID/A001_Scene1.mov"
+    );
+
+    // 2. Final Cut Pro -> AAF (.aaf) -> Final Cut Pro (.fcpxml) + Resolve (.drp)
+    let aaf_out = dir.join("handoff.aaf");
+    let aaf_rep = nle_interchange::write_aaf_file(
+        &fcp_proj,
+        &aaf_out,
+        &ConversionOptions {
+            target_format: NleFormat::Aaf,
+            ..Default::default()
+        },
+    )
+    .expect("FCP -> .aaf");
+    assert_eq!(aaf_rep.sequences_converted, 1);
+    assert_eq!(aaf_rep.video_clips_converted, 2);
+    assert!(aaf_rep.audio_clips_converted >= 1);
+
+    let from_aaf = nle_interchange::read_aaf_file(&aaf_out).expect("read .aaf");
+    assert_eq!(from_aaf.source_format, NleFormat::Aaf);
+    assert_eq!(from_aaf.sequences[0].start_tc_frame, 90_000);
+    assert_eq!(from_aaf.sequences[0].video_tracks[0].clips.len(), 2);
+    assert_eq!(from_aaf.sequences[0].video_tracks[0].transitions.len(), 1);
+    assert_eq!(from_aaf.sequences[0].markers.len(), 1);
+
+    let fcp_from_aaf = dir.join("from_aaf.fcpxml");
+    nle_interchange::write_fcpxml_file(
+        &from_aaf,
+        &fcp_from_aaf,
+        &ConversionOptions {
+            target_format: NleFormat::FinalCutPro,
+            ..Default::default()
+        },
+    )
+    .expect("AAF -> .fcpxml");
+    let reread_fcp_aaf = nle_interchange::read_fcpxml_file(&fcp_from_aaf).expect("re-read .fcpxml");
+    assert_eq!(reread_fcp_aaf.sequences[0].video_tracks[0].clips.len(), 2);
+
+    let drp_from_aaf = dir.join("from_aaf.drp");
+    nle_resolve::write_drp_file(&from_aaf, &drp_from_aaf, &ConversionOptions::default())
+        .expect("AAF -> .drp");
+    let reread_drp_aaf = nle_resolve::read_drp_file(&drp_from_aaf).expect("re-read .drp");
+    assert_eq!(reread_drp_aaf.sequences[0].video_tracks[0].clips.len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

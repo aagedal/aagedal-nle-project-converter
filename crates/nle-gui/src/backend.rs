@@ -14,6 +14,8 @@ pub const SUPPORTED_TARGETS: &[(NleFormat, &str)] = &[
     (NleFormat::FinalCutPro, "Final Cut Pro (.fcpxml)"),
     (NleFormat::OpenTimelineIo, "OpenTimelineIO (.otio)"),
     (NleFormat::Fcp7Xml, "FCP7 XML (.xml — Premiere / Resolve)"),
+    (NleFormat::Edl, "CMX 3600 EDL (.edl)"),
+    (NleFormat::Aaf, "AAF (.aaf — Avid / Pro Tools / Resolve)"),
 ];
 
 #[derive(Debug, Clone)]
@@ -34,8 +36,14 @@ pub fn load_project_from_disk(path: &Path) -> Result<Project, String> {
         "drp" | "drt" => nle_resolve::read_drp_file(path).map_err(|e| e.to_string()),
         "fcpxml" | "fcpxmld" => nle_interchange::read_fcpxml_file(path).map_err(|e| e.to_string()),
         "fcpbundle" => nle_interchange::read_fcpbundle_file(path).map_err(|e| e.to_string()),
+        "otio" | "otiod" | "otioz" => {
+            nle_interchange::read_otio_file(path).map_err(|e| e.to_string())
+        }
+        "xml" => nle_interchange::read_xml_interchange_file(path).map_err(|e| e.to_string()),
+        "edl" => nle_interchange::read_edl_file(path).map_err(|e| e.to_string()),
+        "aaf" => nle_interchange::read_aaf_file(path).map_err(|e| e.to_string()),
         _ => Err(format!(
-            "Unsupported project file '.{ext}'. Supported inputs: .prproj (Premiere Pro), .drp/.drt (DaVinci Resolve), .fcpbundle/.fcpxml/.fcpxmld (Final Cut Pro)."
+            "Unsupported project file '.{ext}'. Supported inputs: .prproj (Premiere Pro), .drp/.drt (DaVinci Resolve), .fcpbundle/.fcpxml/.fcpxmld (Final Cut Pro), .otio/.otiod/.otioz (OpenTimelineIO), .xml (FCP7 XML), .edl (CMX 3600 EDL), .aaf (AAF)."
         )),
     }
 }
@@ -133,9 +141,17 @@ pub fn run_conversion(
             nle_interchange::write_fcp7_xml_file(&project, output_path, &options)
                 .map_err(|e| e.to_string())?
         }
+        NleFormat::Edl => {
+            nle_interchange::write_edl_file(&project, output_path, &options)
+                .map_err(|e| e.to_string())?
+        }
+        NleFormat::Aaf => {
+            nle_interchange::write_aaf_file(&project, output_path, &options)
+                .map_err(|e| e.to_string())?
+        }
         other => {
             return Err(format!(
-                "Direct writing to {} is on the roadmap — please select Premiere Pro (.prproj), Resolve (.drp), Final Cut Pro (.fcpxml), OTIO (.otio), or FCP7 XML (.xml).",
+                "Direct writing to {} is on the roadmap — please select Premiere Pro (.prproj), Resolve (.drp), Final Cut Pro (.fcpxml), OTIO (.otio), FCP7 XML (.xml), EDL (.edl), or AAF (.aaf).",
                 other.display_name()
             ));
         }
@@ -299,6 +315,53 @@ mod tests {
         assert!(matched > 0);
         let (zero_matched, _) = count_matching_relink_paths(&loaded.project, "/NonExistentDrive");
         assert_eq!(zero_matched, 0);
+
+        // Export to OTIO and FCP7 XML, then reload both through load_and_inspect_project!
+        let otio_path = dir.join("gui_demo.otio");
+        let otio_opts = ConversionOptions {
+            target_format: NleFormat::OpenTimelineIo,
+            ..Default::default()
+        };
+        run_conversion(&loaded.project, &otio_path, otio_opts, &decisions).expect("convert to otio");
+        let reloaded_otio = load_and_inspect_project(&otio_path, NleFormat::OpenTimelineIo)
+            .expect("reload written otio");
+        assert_eq!(reloaded_otio.inspection.source_format, NleFormat::OpenTimelineIo);
+        assert_eq!(reloaded_otio.effect_plan.target_format, NleFormat::DaVinciResolve);
+        assert_eq!(reloaded_otio.inspection.sequences.len(), 1);
+
+        let fcp7_path = dir.join("gui_demo.xml");
+        let fcp7_opts = ConversionOptions {
+            target_format: NleFormat::Fcp7Xml,
+            ..Default::default()
+        };
+        run_conversion(&loaded.project, &fcp7_path, fcp7_opts, &decisions).expect("convert to fcp7 xml");
+        let reloaded_fcp7 = load_and_inspect_project(&fcp7_path, NleFormat::Fcp7Xml)
+            .expect("reload written fcp7 xml");
+        assert_eq!(reloaded_fcp7.inspection.source_format, NleFormat::Fcp7Xml);
+        assert_eq!(reloaded_fcp7.effect_plan.target_format, NleFormat::DaVinciResolve);
+        assert_eq!(reloaded_fcp7.inspection.sequences.len(), 1);
+
+        let edl_path = dir.join("gui_demo.edl");
+        let edl_opts = ConversionOptions {
+            target_format: NleFormat::Edl,
+            ..Default::default()
+        };
+        run_conversion(&loaded.project, &edl_path, edl_opts, &decisions).expect("convert to edl");
+        let reloaded_edl =
+            load_and_inspect_project(&edl_path, NleFormat::Edl).expect("reload written edl");
+        assert_eq!(reloaded_edl.inspection.source_format, NleFormat::Edl);
+        assert_eq!(reloaded_edl.inspection.sequences.len(), 1);
+
+        let aaf_path = dir.join("gui_demo.aaf");
+        let aaf_opts = ConversionOptions {
+            target_format: NleFormat::Aaf,
+            ..Default::default()
+        };
+        run_conversion(&loaded.project, &aaf_path, aaf_opts, &decisions).expect("convert to aaf");
+        let reloaded_aaf =
+            load_and_inspect_project(&aaf_path, NleFormat::Aaf).expect("reload written aaf");
+        assert_eq!(reloaded_aaf.inspection.source_format, NleFormat::Aaf);
+        assert_eq!(reloaded_aaf.inspection.sequences.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

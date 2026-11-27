@@ -231,14 +231,47 @@ impl ProjectInspection {
 }
 
 /// Apply path prefix relinking rules to all media references in a project clone.
+/// Matches prefixes case-insensitively with normalized `/` / `\` separators so
+/// Windows and POSIX paths relink reliably across platforms.
 pub fn apply_relink_rules(project: &mut Project, rules: &[PathRelinkRule]) {
     if rules.is_empty() {
         return;
     }
     let rewrite = |path: &mut String| {
+        if path.is_empty() {
+            return;
+        }
+        let norm_path = path.replace('\\', "/");
+        let norm_path_lower = norm_path.to_ascii_lowercase();
         for rule in rules {
-            if !rule.from_prefix.is_empty() && path.starts_with(&rule.from_prefix) {
-                *path = format!("{}{}", rule.to_prefix, &path[rule.from_prefix.len()..]);
+            let from = rule.from_prefix.trim();
+            if from.is_empty() {
+                continue;
+            }
+            if path.starts_with(from) {
+                let tail = &path[from.len()..];
+                let to_uses_backslash =
+                    rule.to_prefix.contains('\\') && !rule.to_prefix.contains('/');
+                let formatted_tail = if to_uses_backslash {
+                    tail.replace('/', "\\")
+                } else {
+                    tail.replace('\\', "/")
+                };
+                *path = format!("{}{}", rule.to_prefix, formatted_tail);
+                break;
+            }
+            let norm_from = from.replace('\\', "/");
+            let norm_from_lower = norm_from.to_ascii_lowercase();
+            if norm_path_lower.starts_with(&norm_from_lower) {
+                let tail = &norm_path[norm_from.len()..];
+                let to_uses_backslash =
+                    rule.to_prefix.contains('\\') && !rule.to_prefix.contains('/');
+                let formatted_tail = if to_uses_backslash {
+                    tail.replace('/', "\\")
+                } else {
+                    tail.to_string()
+                };
+                *path = format!("{}{}", rule.to_prefix, formatted_tail);
                 break;
             }
         }
@@ -257,5 +290,60 @@ pub fn apply_relink_rules(project: &mut Project, rules: &[PathRelinkRule]) {
                 rewrite(&mut clip.media_path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AlphaMode, DataLevels, MediaAsset, MediaKind};
+    use crate::time::Rational;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn relink_rules_handle_mixed_separators_and_case() {
+        let mut project = Project {
+            media_assets: vec![MediaAsset {
+                id: "m1".into(),
+                name: "Clip.mov".into(),
+                path: "D:/Media/Shoot/Clip.mov".into(),
+                media_kind: MediaKind::Video,
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                duration_frames: 100,
+                source_tc_frame: 0,
+                source_tc_string: "00:00:00:00".into(),
+                audio_channels: 2,
+                audio_sample_rate: 48000,
+                color_space: None,
+                video_codec: None,
+                audio_codec: None,
+                alpha_mode: AlphaMode::Default,
+                data_levels: DataLevels::Auto,
+                pixel_aspect_ratio: None,
+                metadata: BTreeMap::new(),
+                custom_metadata: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+
+        apply_relink_rules(
+            &mut project,
+            &[PathRelinkRule {
+                from_prefix: r"d:\Media".into(),
+                to_prefix: "/Volumes/RAID/Media".into(),
+            }],
+        );
+        assert_eq!(project.media_assets[0].path, "/Volumes/RAID/Media/Shoot/Clip.mov");
+
+        apply_relink_rules(
+            &mut project,
+            &[PathRelinkRule {
+                from_prefix: "/Volumes/RAID/Media".into(),
+                to_prefix: r"E:\Edit\Media".into(),
+            }],
+        );
+        assert_eq!(project.media_assets[0].path, r"E:\Edit\Media\Shoot\Clip.mov");
     }
 }
